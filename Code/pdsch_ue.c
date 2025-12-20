@@ -36,12 +36,15 @@
 #include <signal.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <errno.h>
+#include <arpa/inet.h>
 #include "srslte/common/gen_mch_tables.h"
 #include "srslte/common/crash_handler.h"
 #include <srslte/phy/common/phy_common.h>
 #include "srslte/phy/io/filesink.h"
 #include "srslte/srslte.h"
 #include "srslte/parse_data.c"
+#include "data_handler.h"
 
 #define ENABLE_AGC_DEFAULT
 
@@ -296,7 +299,20 @@ void parse_args(prog_args_t *args, int argc, char **argv) {
 }
 /**********************************************************************/
 
-/* TODO: Do something with the output data */
+/*
+ * Decoded PDSCH data storage
+ *
+ * This array stores decoded data from up to SRSLTE_MAX_CODEWORDS (2) transport blocks.
+ * Data is processed via:
+ * - save_bytes(): Writes to PCAP and text files for offline analysis
+ * - UDP transmission: Sends framed packets to remote receiver (if -u option used)
+ *
+ * For extensibility, consider implementing callback-based data handlers
+ * (see data_handler.h if available) for:
+ * - Real-time JSON streaming
+ * - Database storage
+ * - Custom protocol decoders
+ */
 uint8_t *data[SRSLTE_MAX_CODEWORDS];
 
 bool go_exit = false; 
@@ -366,6 +382,21 @@ int main(int argc, char **argv) {
   float cfo = 0; 
 
   srslte_debug_handle_crash(argc, argv);
+
+  /* Initialize data handler infrastructure */
+  data_handler_init();
+
+  /* Optional: Register JSON output handler for real-time logging */
+  static FILE *json_out = NULL;
+  static stats_context_t capture_stats = {0};
+
+  json_out = fopen("capture.jsonl", "a");
+  if (json_out) {
+    data_handler_register(DATA_TYPE_PAGING, handler_json_output, json_out, "JSON Logger");
+  }
+
+  /* Register statistics handler */
+  data_handler_register_global(handler_statistics, &capture_stats, "Statistics");
 
   parse_args(&prog_args, argc, argv);
   
@@ -745,17 +776,82 @@ int main(int argc, char **argv) {
             if (n < 0) {
              // fprintf(stderr, "Error decoding UE DL\n");fflush(stdout);
             } else if (n > 0) {
-              
+
+              /* Process through data handler infrastructure */
+              {
+                decoded_data_t decoded = {
+                  .type = DATA_TYPE_PAGING,
+                  .sfn = sfn,
+                  .sfidx = sfidx,
+                  .rnti = prog_args.rnti,
+                  .payload = data[0],
+                  .payload_len = (n > 0) ? (1 + (n - 1) / 8) : 0,
+                  .payload_bits = n,
+                  .rsrp = rsrp0,
+                  .rsrq = rsrq,
+                  .snr = (noise > 0) ? (rsrp0 / noise) : 0,
+                  .cfo = srslte_ue_sync_get_cfo(&ue_sync),
+                  .cell_id = cell.id,
+                  .nof_ports = cell.nof_ports,
+                  .nof_prb = cell.nof_prb
+                };
+                data_handler_set_timestamp(&decoded);
+                data_handler_process(&decoded);
+              }
+
               /* Send data if socket active */
               save_bytes(pcap_data, parse_file, "IMSI", data[0], n/4);
               if (prog_args.net_port > 0) {
-                if(sfidx == 1) {
-                  srslte_netsink_write(&net_sink, data[0], 1+(n-1)/8);
-                } else {
-                // FIXME: UDP Data transmission does not work
+                /*
+                 * UDP Transmission Fix:
+                 * - Use consistent size calculation based on actual decoded bits (n)
+                 * - Add packet framing with header for receiver
+                 * - Validate data before transmission
+                 * - Handle non-blocking socket errors properly
+                 */
+
+                /* Calculate payload size: n is in bits, convert to bytes */
+                uint32_t payload_bytes = (n > 0) ? (1 + (n - 1) / 8) : 0;
+
+                if (payload_bytes > 0 && payload_bytes <= 1500) {
+                  /* Create framed packet with header for receiver identification */
+                  typedef struct __attribute__((packed)) {
+                    uint32_t magic;         /* 0x4C544553 "LTES" */
+                    uint32_t sfn;           /* System Frame Number */
+                    uint8_t  sfidx;         /* Subframe index */
+                    uint8_t  tb_idx;        /* Transport block index */
+                    uint16_t payload_len;   /* Payload length */
+                  } udp_header_t;
+
+                  static uint8_t udp_packet[sizeof(udp_header_t) + 1500];
+                  udp_header_t *hdr = (udp_header_t *)udp_packet;
+
                   for (uint32_t tb = 0; tb < SRSLTE_MAX_CODEWORDS; tb++) {
-                    if (ue_dl.pdsch_cfg.grant.tb_en[tb]) {
-                      srslte_netsink_write(&net_sink, data[tb], 1 + (ue_dl.pdsch_cfg.grant.mcs[tb].tbs - 1) / 8);
+                    if (ue_dl.pdsch_cfg.grant.tb_en[tb] && data[tb] != NULL) {
+                      /* Build packet header */
+                      hdr->magic = htonl(0x4C544553);  /* "LTES" magic */
+                      hdr->sfn = htonl(sfn);
+                      hdr->sfidx = sfidx;
+                      hdr->tb_idx = tb;
+                      hdr->payload_len = htons(payload_bytes);
+
+                      /* Copy payload after header */
+                      memcpy(udp_packet + sizeof(udp_header_t), data[tb], payload_bytes);
+
+                      /* Send packet */
+                      int ret = srslte_netsink_write(&net_sink, udp_packet,
+                                                     sizeof(udp_header_t) + payload_bytes);
+                      if (ret < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                          /* Non-blocking socket buffer full - normal, skip */
+                          static uint32_t udp_drop_count = 0;
+                          if (++udp_drop_count % 1000 == 0) {
+                            fprintf(stderr, "UDP: %u packets dropped (buffer full)\n", udp_drop_count);
+                          }
+                        } else {
+                          fprintf(stderr, "UDP TX error: %s\n", strerror(errno));
+                        }
+                      }
                     }
                   }
                 }
@@ -950,10 +1046,17 @@ int main(int argc, char **argv) {
 #ifndef DISABLE_RF
   if (!prog_args.input_file_name) {
     srslte_ue_mib_free(&ue_mib);
-    srslte_rf_close(&rf);    
+    srslte_rf_close(&rf);
   }
 #endif
-  
+
+  /* Print capture statistics and cleanup */
+  stats_print_summary(&capture_stats, stdout);
+  if (json_out) {
+    fclose(json_out);
+  }
+  data_handler_shutdown();
+
   printf("\nBye\n");
   exit(0);
 }

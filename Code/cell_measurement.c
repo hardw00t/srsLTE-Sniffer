@@ -42,6 +42,7 @@
 #include "srslte/phy/rf/rf_utils.h"
 #include "srslte/common/crash_handler.h"
 #include "srslte/parse_data.c"
+#include "sib_parser.h"
 
 cell_search_cfg_t cell_detect_config = {
   SRSLTE_DEFAULT_MAX_FRAMES_PBCH,
@@ -119,10 +120,25 @@ int  parse_args(prog_args_t *args, int argc, char **argv) {
 }
 /**********************************************************************/
 
-/* TODO: Do something with the output data */
+/*
+ * Decoded data storage for SIB capture
+ *
+ * This array stores decoded System Information Blocks and other
+ * downlink data. Used for:
+ * - SIB1 capture and parsing (cell info, SI scheduling)
+ * - SIB2 capture (system configuration)
+ * - Cell measurements
+ */
 uint8_t *data[SRSLTE_MAX_CODEWORDS];
 
-bool go_exit = false; 
+/* SIB parsing state */
+static sib1_info_t sib1_info;
+static si_window_t sib2_window;
+static bool sib2_window_valid = false;
+static int sib2_decode_attempts = 0;
+#define MAX_SIB2_ATTEMPTS 100
+
+bool go_exit = false;
 void sig_int_handler(int signo)
 {
   printf("SIGINT received. Exiting...\n");
@@ -131,13 +147,14 @@ void sig_int_handler(int signo)
   }
 }
 
-int srslte_rf_recv_wrapper(void *h, cf_t *data[SRSLTE_MAX_PORTS], uint32_t nsamples, srslte_timestamp_t *q) {  
+int srslte_rf_recv_wrapper(void *h, cf_t *data[SRSLTE_MAX_PORTS], uint32_t nsamples, srslte_timestamp_t *q) {
   DEBUG(" ----  Receive %d samples  ---- \n", nsamples);
-  
+
   return srslte_rf_recv(h, data[0], nsamples, 1);
 }
 
-enum receiver_state { DECODE_MIB, DECODE_SIB, MEASURE} state; 
+/* Extended state machine with SIB2 capture */
+enum receiver_state { DECODE_MIB, DECODE_SIB1, DECODE_SIB2, MEASURE } state; 
 
 #define MAX_SINFO 10
 #define MAX_NEIGHBOUR_CELLS     128
@@ -322,35 +339,108 @@ int main(int argc, char **argv) {
             if (n < 0) {
               fprintf(stderr, "Error decoding UE MIB\n");
               return -1;
-            } else if (n == SRSLTE_UE_MIB_FOUND) {   
+            } else if (n == SRSLTE_UE_MIB_FOUND) {
               srslte_pbch_mib_unpack(bch_payload, &cell, &sfn);
               printf("Decoded MIB. SFN: %d, offset: %d\n", sfn, sfn_offset);
-              sfn = (sfn + sfn_offset)%1024; 
-              state = DECODE_SIB; 
+              sfn = (sfn + sfn_offset)%1024;
+              state = DECODE_SIB1;
             }
           }
           break;
-        case DECODE_SIB:
-          /* We are looking for SI Blocks, search only in appropiate places */
+
+        case DECODE_SIB1:
+          /* SIB1 is transmitted in subframe 5 of even-numbered radio frames */
           if ((srslte_ue_sync_get_sfidx(&ue_sync) == 5 && (sfn%2)==0)) {
             n = srslte_ue_dl_decode(&ue_dl, data, 0, sfn*10+srslte_ue_sync_get_sfidx(&ue_sync), acks);
             if (n < 0) {
-              fprintf(stderr, "Error decoding UE DL\n");fflush(stdout);
+              fprintf(stderr, "Error decoding UE DL\n");
+              fflush(stdout);
               return -1;
             } else if (n == 0) {
               printf("CFO: %+6.4f kHz, SFO: %+6.4f kHz, PDCCH-Det: %.3f\r",
-                      srslte_ue_sync_get_cfo(&ue_sync)/1000, srslte_ue_sync_get_sfo(&ue_sync)/1000, 
+                      srslte_ue_sync_get_cfo(&ue_sync)/1000, srslte_ue_sync_get_sfo(&ue_sync)/1000,
                       (float) ue_dl.nof_detected/nof_trials);
-              nof_trials++; 
+              nof_trials++;
             } else {
-              printf("Decoded SIB1. Payload: ");
-              srslte_vec_fprint_byte(stdout, data[0], n/8);;
+              printf("\n*** Decoded SIB1 (%d bits) ***\n", n);
+              printf("Payload: ");
+              srslte_vec_fprint_byte(stdout, data[0], n/8);
               save_bytes("database.txt", "sniffing_data.txt", "SIB1", data[0], n);
-              break;
+
+              /* Parse SIB1 to get SI scheduling for SIB2 */
+              if (sib1_parse(data[0], n/8, &sib1_info) == 0) {
+                sib1_print(&sib1_info, stdout);
+
+                if (sib1_info.sib2_found) {
+                  /* Calculate first SIB2 window */
+                  sib2_window_calculate(&sib1_info, sfn, &sib2_window);
+                  sib2_window_valid = true;
+                  sib2_decode_attempts = 0;
+                  printf("\nSIB2 scheduled in SI message %d\n", sib1_info.sib2_si_index);
+                  si_window_print(&sib2_window, stdout);
+                  state = DECODE_SIB2;
+                } else {
+                  printf("SIB2 not found in scheduling, proceeding to MEASURE\n");
+                  state = MEASURE;
+                }
+              } else {
+                printf("Failed to parse SIB1, proceeding to MEASURE\n");
+                state = MEASURE;
+              }
             }
           }
-        
-      case MEASURE:
+          break;
+
+        case DECODE_SIB2:
+          {
+            uint32_t current_sf = sfn * 10 + srslte_ue_sync_get_sfidx(&ue_sync);
+            uint32_t window_start = sib2_window.start_sfn * 10 + sib2_window.start_subframe;
+            uint32_t window_end = sib2_window.end_sfn * 10 + sib2_window.end_subframe;
+
+            /* Check if we're within the SI window */
+            if (si_window_is_active(&sib2_window, sfn, srslte_ue_sync_get_sfidx(&ue_sync))) {
+              /* Try to decode SI message containing SIB2 */
+              n = srslte_ue_dl_decode(&ue_dl, data, 0, current_sf, acks);
+
+              if (n > 0) {
+                printf("\n*** Decoded SIB2 (%d bits) ***\n", n);
+                printf("Payload: ");
+                srslte_vec_fprint_byte(stdout, data[0], n/8);
+                save_bytes("database.txt", "sniffing_data.txt", "SIB2", data[0], n);
+
+                /* Parse SIB2 */
+                sib2_info_t sib2_info;
+                if (sib2_parse(data[0], n/8, &sib2_info) == 0) {
+                  sib2_print(&sib2_info, stdout);
+                }
+
+                printf("\nSIB capture complete, proceeding to MEASURE\n");
+                state = MEASURE;
+              } else {
+                /* Still in window but no decode yet */
+                sib2_decode_attempts++;
+                printf("SIB2 window active, attempt %d/%d, sf=%u\r",
+                       sib2_decode_attempts, MAX_SIB2_ATTEMPTS, current_sf);
+              }
+            } else if (current_sf > window_end || sib2_decode_attempts >= MAX_SIB2_ATTEMPTS) {
+              /* Window passed or too many attempts, calculate next window */
+              sib2_window_calculate(&sib1_info, sfn, &sib2_window);
+              sib2_decode_attempts = 0;
+              printf("\nMissed SIB2 window, next window: ");
+              si_window_print(&sib2_window, stdout);
+
+              /* After several windows, give up and go to MEASURE */
+              static int windows_missed = 0;
+              windows_missed++;
+              if (windows_missed >= 5) {
+                printf("Giving up on SIB2 after %d missed windows\n", windows_missed);
+                state = MEASURE;
+              }
+            }
+          }
+          break;
+
+        case MEASURE:
         
         if (srslte_ue_sync_get_sfidx(&ue_sync) == 5) {
           /* Run FFT for all subframe data */

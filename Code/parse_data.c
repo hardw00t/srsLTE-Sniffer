@@ -83,14 +83,33 @@ void print_IMSI(FILE *pcap, FILE *output, uint8_t *x, const uint32_t len){
 }
 
 
+/*
+ * Print System Information Block to PCAP format
+ *
+ * Headers for different SIB types (for text2pcap with -l 147):
+ * - SIB1: 0000 01 01 04 02 ff ff 03 00 00 04 09 05 07 01 01
+ * - SIB2: 0000 01 01 04 02 ff ff 03 00 00 04 0a 12 07 01 01 00 00
+ *
+ * These headers encode LTE RRC DL-CCCH message type information
+ * for Wireshark to properly dissect the payload.
+ */
 void print_SIB(FILE *pcap, char *type, uint8_t *x, const uint32_t len) {
-  //SIB1
-  char *header = "0000 01 01 04 02 ff ff 03 00 00 04 09 05 07 01 01";
-  if (strncmp(type, "SIB2", 5)==0){ //WIP
+  const char *header = NULL;
+
+  if (strncmp(type, "SIB1", 4) == 0) {
+    header = "0000 01 01 04 02 ff ff 03 00 00 04 09 05 07 01 01";
+  } else if (strncmp(type, "SIB2", 4) == 0) {
     header = "0000 01 01 04 02 ff ff 03 00 00 04 0a 12 07 01 01 00 00";
+  } else if (strncmp(type, "SIB", 3) == 0) {
+    /* Generic SIB - use SIB1 header as fallback */
+    header = "0000 01 01 04 02 ff ff 03 00 00 04 09 05 07 01 01";
+  } else {
+    /* Unknown type */
+    header = "0000 01 01 04 02 ff ff 03 00 00 04 09 05 07 01 01";
   }
+
   fprintf(pcap, "%s ", header);
-  for (int i=0; i<len; i++){
+  for (int i = 0; i < len; i++) {
     fprintf(pcap, "%02x ", x[i]);
   }
   fprintf(pcap, "\n");
