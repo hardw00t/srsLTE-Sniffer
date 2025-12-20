@@ -1,0 +1,37 @@
+{
+  "radio": {
+    "frequencies": [1845000000, 1815000000],
+    "gain": 40.0,
+    "rnti": 65534,
+    "sample_rate": 1920000
+  },
+  "capture": {
+    "output_dir": "./output",
+    "enable_json": true,
+    "enable_sqlite": true,
+    "enable_pcap": true,
+    "enable_csv": true
+  },
+  "tracking": {
+    "enabled": true,
+    "cache_size": 10000,
+    "expiry_seconds": 86400
+  },
+  "logging": {
+    "file": "srslte_sniffer.log",
+    "level": "info",
+    "console": true,
+    "file_logging": false,
+    "max_size": 10485760,
+    "rotate": true
+  },
+  "web": {
+    "enabled": false,
+    "port": 8080,
+    "bind_address": "127.0.0.1"
+  },
+  "database": {
+    "db_path": "captures.db",
+    "async_writes": true
+  }
+}

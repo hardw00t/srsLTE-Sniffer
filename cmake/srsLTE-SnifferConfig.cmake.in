@@ -1,0 +1,6 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/srsLTE-SnifferTargets.cmake" OPTIONAL)
+
+set(srsLTE-Sniffer_FOUND TRUE)
+set(srsLTE-Sniffer_VERSION @PROJECT_VERSION@)
