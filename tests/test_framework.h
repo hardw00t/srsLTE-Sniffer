@@ -102,10 +102,10 @@ static test_state_t g_test_state = {0};
     if ((expected) == (actual)) { \
         TEST_PASS(); \
     } else { \
-        char msg[256]; \
-        snprintf(msg, sizeof(msg), "Expected %ld, got %ld", \
+        char _assert_msg[256]; \
+        snprintf(_assert_msg, sizeof(_assert_msg), "Expected %ld, got %ld", \
                  (long)(expected), (long)(actual)); \
-        TEST_FAIL(msg); \
+        TEST_FAIL(_assert_msg); \
     } \
 } while(0)
 
@@ -113,9 +113,9 @@ static test_state_t g_test_state = {0};
     if ((not_expected) != (actual)) { \
         TEST_PASS(); \
     } else { \
-        char msg[256]; \
-        snprintf(msg, sizeof(msg), "Expected not %ld", (long)(not_expected)); \
-        TEST_FAIL(msg); \
+        char _assert_msg[256]; \
+        snprintf(_assert_msg, sizeof(_assert_msg), "Expected not %ld", (long)(not_expected)); \
+        TEST_FAIL(_assert_msg); \
     } \
 } while(0)
 
@@ -123,10 +123,10 @@ static test_state_t g_test_state = {0};
     if ((actual) < (max)) { \
         TEST_PASS(); \
     } else { \
-        char msg[256]; \
-        snprintf(msg, sizeof(msg), "Expected %ld < %ld", \
+        char _assert_msg[256]; \
+        snprintf(_assert_msg, sizeof(_assert_msg), "Expected %ld < %ld", \
                  (long)(actual), (long)(max)); \
-        TEST_FAIL(msg); \
+        TEST_FAIL(_assert_msg); \
     } \
 } while(0)
 
@@ -134,10 +134,10 @@ static test_state_t g_test_state = {0};
     if ((actual) <= (max)) { \
         TEST_PASS(); \
     } else { \
-        char msg[256]; \
-        snprintf(msg, sizeof(msg), "Expected %ld <= %ld", \
+        char _assert_msg[256]; \
+        snprintf(_assert_msg, sizeof(_assert_msg), "Expected %ld <= %ld", \
                  (long)(actual), (long)(max)); \
-        TEST_FAIL(msg); \
+        TEST_FAIL(_assert_msg); \
     } \
 } while(0)
 
@@ -145,10 +145,10 @@ static test_state_t g_test_state = {0};
     if ((actual) > (min)) { \
         TEST_PASS(); \
     } else { \
-        char msg[256]; \
-        snprintf(msg, sizeof(msg), "Expected %ld > %ld", \
+        char _assert_msg[256]; \
+        snprintf(_assert_msg, sizeof(_assert_msg), "Expected %ld > %ld", \
                  (long)(actual), (long)(min)); \
-        TEST_FAIL(msg); \
+        TEST_FAIL(_assert_msg); \
     } \
 } while(0)
 
@@ -156,10 +156,10 @@ static test_state_t g_test_state = {0};
     if ((actual) >= (min)) { \
         TEST_PASS(); \
     } else { \
-        char msg[256]; \
-        snprintf(msg, sizeof(msg), "Expected %ld >= %ld", \
+        char _assert_msg[256]; \
+        snprintf(_assert_msg, sizeof(_assert_msg), "Expected %ld >= %ld", \
                  (long)(actual), (long)(min)); \
-        TEST_FAIL(msg); \
+        TEST_FAIL(_assert_msg); \
     } \
 } while(0)
 
@@ -167,11 +167,11 @@ static test_state_t g_test_state = {0};
     if ((expected) && (actual) && strcmp((expected), (actual)) == 0) { \
         TEST_PASS(); \
     } else { \
-        char msg[256]; \
-        snprintf(msg, sizeof(msg), "Expected \"%s\", got \"%s\"", \
+        char _assert_msg[256]; \
+        snprintf(_assert_msg, sizeof(_assert_msg), "Expected \"%s\", got \"%s\"", \
                  (expected) ? (expected) : "NULL", \
                  (actual) ? (actual) : "NULL"); \
-        TEST_FAIL(msg); \
+        TEST_FAIL(_assert_msg); \
     } \
 } while(0)
 
@@ -196,10 +196,10 @@ static test_state_t g_test_state = {0};
     if (diff <= (epsilon)) { \
         TEST_PASS(); \
     } else { \
-        char msg[256]; \
-        snprintf(msg, sizeof(msg), "Expected %f, got %f (diff=%f)", \
+        char _assert_msg[256]; \
+        snprintf(_assert_msg, sizeof(_assert_msg), "Expected %f, got %f (diff=%f)", \
                  (double)(expected), (double)(actual), diff); \
-        TEST_FAIL(msg); \
+        TEST_FAIL(_assert_msg); \
     } \
 } while(0)
 

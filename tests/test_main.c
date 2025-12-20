@@ -16,6 +16,8 @@ extern void run_memory_pool_tests(void);
 extern void run_logger_tests(void);
 extern void run_config_parser_tests(void);
 extern void run_convert_csv_tests(void);
+extern void run_mib_parser_tests(void);
+extern void run_paging_parser_tests(void);
 
 int main(int argc, char *argv[]) {
     (void)argc;
@@ -32,6 +34,8 @@ int main(int argc, char *argv[]) {
     run_logger_tests();
     run_config_parser_tests();
     run_convert_csv_tests();
+    run_mib_parser_tests();
+    run_paging_parser_tests();
 
     return test_summary();
 }

@@ -73,6 +73,9 @@ set(CORE_SOURCES
     Code/config_parser.c
     Code/memory_pool.c
     Code/identity_tracker.c
+    Code/mib_parser.c
+    Code/paging_parser.c
+    Code/handler_identity.c
 )
 
 if(ENABLE_SQLITE)
@@ -131,6 +134,8 @@ if(BUILD_TESTS)
         tests/test_memory_pool.c
         tests/test_logger.c
         tests/test_config_parser.c
+        tests/test_mib_parser.c
+        tests/test_paging_parser.c
     )
 
     # Create test executable
@@ -164,6 +169,9 @@ install(FILES
     Code/config_parser.h
     Code/memory_pool.h
     Code/identity_tracker.h
+    Code/mib_parser.h
+    Code/paging_parser.h
+    Code/handler_identity.h
     DESTINATION include/srslte_sniffer
 )
 
