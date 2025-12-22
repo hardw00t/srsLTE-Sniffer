@@ -281,8 +281,10 @@ install(TARGETS srsran_sniffer_core
     LIBRARY DESTINATION lib
 )
 
-# Install Wireshark dissector
-install(FILES wireshark/srsran_sniffer.lua
+# Install Wireshark dissectors (both new and legacy for compatibility)
+install(FILES
+    wireshark/srsran_sniffer.lua
+    wireshark/srslte_sniffer.lua
     DESTINATION share/wireshark/plugins
     OPTIONAL
 )
