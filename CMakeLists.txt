@@ -1,20 +1,23 @@
 ########################################################################
-# srsLTE-Sniffer CMake Build System
+# srsRAN-Sniffer CMake Build System
 #
 # This CMake file builds the standalone tools and provides integration
-# points for srsLTE library when available.
+# points for srsRAN_4G library when available.
+#
+# Compatible with srsRAN_4G (formerly srsLTE) version 23.04+
 ########################################################################
 
 cmake_minimum_required(VERSION 3.10)
-project(srsLTE-Sniffer
-    VERSION 1.0.0
-    DESCRIPTION "LTE IMSI Catcher and Signal Analyzer"
-    LANGUAGES C
+project(srsRAN-Sniffer
+    VERSION 1.1.0
+    DESCRIPTION "LTE IMSI Catcher and Signal Analyzer - srsRAN_4G Compatible"
+    LANGUAGES C CXX
 )
 
 # Build options
 option(BUILD_TESTS "Build unit tests" ON)
 option(BUILD_TOOLS "Build standalone tools" ON)
+option(BUILD_SNIFFER "Build main sniffer with srsRAN_4G" OFF)
 option(ENABLE_SQLITE "Enable SQLite database handler" ON)
 option(ENABLE_JSON_CONFIG "Enable JSON configuration support" ON)
 option(ENABLE_PCAP "Enable enhanced PCAP export" ON)
@@ -62,6 +65,61 @@ if(ENABLE_SQLITE)
 endif()
 
 ########################################################################
+# srsRAN_4G Library Discovery (for main sniffer build)
+########################################################################
+
+if(BUILD_SNIFFER)
+    # Try to find srsRAN_4G using pkg-config
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(SRSRAN srsran)
+    endif()
+
+    # Manual discovery if pkg-config failed
+    if(NOT SRSRAN_FOUND)
+        # Look for srsRAN install
+        find_path(SRSRAN_INCLUDE_DIR srsran/srsran.h
+            HINTS
+                $ENV{SRSRAN_DIR}/include
+                /usr/local/include
+                /usr/include
+        )
+        find_library(SRSRAN_RF_LIBRARY srsran_rf
+            HINTS
+                $ENV{SRSRAN_DIR}/lib
+                /usr/local/lib
+                /usr/lib
+        )
+        find_library(SRSRAN_PHY_LIBRARY srsran_phy
+            HINTS
+                $ENV{SRSRAN_DIR}/lib
+                /usr/local/lib
+                /usr/lib
+        )
+        find_library(SRSRAN_COMMON_LIBRARY srsran_common
+            HINTS
+                $ENV{SRSRAN_DIR}/lib
+                /usr/local/lib
+                /usr/lib
+        )
+
+        if(SRSRAN_INCLUDE_DIR AND SRSRAN_RF_LIBRARY AND SRSRAN_PHY_LIBRARY)
+            set(SRSRAN_FOUND TRUE)
+            set(SRSRAN_INCLUDE_DIRS ${SRSRAN_INCLUDE_DIR})
+            set(SRSRAN_LIBRARIES ${SRSRAN_RF_LIBRARY} ${SRSRAN_PHY_LIBRARY})
+            if(SRSRAN_COMMON_LIBRARY)
+                list(APPEND SRSRAN_LIBRARIES ${SRSRAN_COMMON_LIBRARY})
+            endif()
+            message(STATUS "srsRAN_4G found: ${SRSRAN_INCLUDE_DIRS}")
+        else()
+            message(WARNING "srsRAN_4G not found - main sniffer will not be built")
+            message(STATUS "  Install srsRAN_4G or set SRSRAN_DIR environment variable")
+            set(BUILD_SNIFFER OFF)
+        endif()
+    endif()
+endif()
+
+########################################################################
 # Core Library
 ########################################################################
 
@@ -87,19 +145,22 @@ if(ENABLE_PCAP)
 endif()
 
 # Create core library
-add_library(srslte_sniffer_core STATIC ${CORE_SOURCES})
-target_include_directories(srslte_sniffer_core PUBLIC
+add_library(srsran_sniffer_core STATIC ${CORE_SOURCES})
+target_include_directories(srsran_sniffer_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/Code
 )
-target_link_libraries(srslte_sniffer_core
+target_link_libraries(srsran_sniffer_core
     Threads::Threads
     m
 )
 
 if(ENABLE_SQLITE AND SQLITE3_FOUND)
-    target_include_directories(srslte_sniffer_core PUBLIC ${SQLITE3_INCLUDE_DIRS})
-    target_link_libraries(srslte_sniffer_core ${SQLITE3_LIBRARIES})
+    target_include_directories(srsran_sniffer_core PUBLIC ${SQLITE3_INCLUDE_DIRS})
+    target_link_libraries(srsran_sniffer_core ${SQLITE3_LIBRARIES})
 endif()
+
+# Alias for backward compatibility
+add_library(srslte_sniffer_core ALIAS srsran_sniffer_core)
 
 ########################################################################
 # Standalone Tools
@@ -108,10 +169,41 @@ endif()
 if(BUILD_TOOLS)
     # convert_to_csv tool
     add_executable(convert_to_csv Code/convert_to_csv.c)
-    target_link_libraries(convert_to_csv srslte_sniffer_core)
+    target_link_libraries(convert_to_csv srsran_sniffer_core)
 
     # Install tools
     install(TARGETS convert_to_csv
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+########################################################################
+# Main Sniffer (requires srsRAN_4G)
+########################################################################
+
+if(BUILD_SNIFFER AND SRSRAN_FOUND)
+    # pdsch_ue - Main sniffer application
+    add_executable(pdsch_ue Code/pdsch_ue.c)
+    target_include_directories(pdsch_ue PRIVATE ${SRSRAN_INCLUDE_DIRS})
+    target_link_libraries(pdsch_ue
+        srsran_sniffer_core
+        ${SRSRAN_LIBRARIES}
+        Threads::Threads
+        m
+    )
+
+    # cell_measurement utility
+    add_executable(cell_measurement Code/cell_measurement.c)
+    target_include_directories(cell_measurement PRIVATE ${SRSRAN_INCLUDE_DIRS})
+    target_link_libraries(cell_measurement
+        srsran_sniffer_core
+        ${SRSRAN_LIBRARIES}
+        Threads::Threads
+        m
+    )
+
+    # Install sniffer executables
+    install(TARGETS pdsch_ue cell_measurement
         RUNTIME DESTINATION bin
     )
 endif()
@@ -144,7 +236,7 @@ if(BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/Code
         ${CMAKE_CURRENT_SOURCE_DIR}/tests
     )
-    target_link_libraries(run_tests srslte_sniffer_core)
+    target_link_libraries(run_tests srsran_sniffer_core)
 
     # Register tests
     add_test(NAME AllTests COMMAND run_tests)
@@ -172,26 +264,27 @@ install(FILES
     Code/mib_parser.h
     Code/paging_parser.h
     Code/handler_identity.h
-    DESTINATION include/srslte_sniffer
+    DESTINATION include/srsran_sniffer
 )
 
 if(ENABLE_SQLITE)
-    install(FILES Code/handler_sqlite.h DESTINATION include/srslte_sniffer)
+    install(FILES Code/handler_sqlite.h DESTINATION include/srsran_sniffer)
 endif()
 
 if(ENABLE_PCAP)
-    install(FILES Code/pcap_writer.h DESTINATION include/srslte_sniffer)
+    install(FILES Code/pcap_writer.h DESTINATION include/srsran_sniffer)
 endif()
 
 # Install library
-install(TARGETS srslte_sniffer_core
+install(TARGETS srsran_sniffer_core
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
 )
 
 # Install Wireshark dissector
-install(FILES wireshark/srslte_sniffer.lua
+install(FILES wireshark/srsran_sniffer.lua
     DESTINATION share/wireshark/plugins
+    OPTIONAL
 )
 
 ########################################################################
@@ -201,21 +294,21 @@ install(FILES wireshark/srslte_sniffer.lua
 include(CMakePackageConfigHelpers)
 
 configure_package_config_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/srsLTE-SnifferConfig.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/srsLTE-SnifferConfig.cmake
-    INSTALL_DESTINATION lib/cmake/srsLTE-Sniffer
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/srsRAN-SnifferConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/srsRAN-SnifferConfig.cmake
+    INSTALL_DESTINATION lib/cmake/srsRAN-Sniffer
 )
 
 write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/srsLTE-SnifferConfigVersion.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/srsRAN-SnifferConfigVersion.cmake
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY SameMajorVersion
 )
 
 install(FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/srsLTE-SnifferConfig.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/srsLTE-SnifferConfigVersion.cmake
-    DESTINATION lib/cmake/srsLTE-Sniffer
+    ${CMAKE_CURRENT_BINARY_DIR}/srsRAN-SnifferConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/srsRAN-SnifferConfigVersion.cmake
+    DESTINATION lib/cmake/srsRAN-Sniffer
 )
 
 ########################################################################
@@ -223,12 +316,14 @@ install(FILES
 ########################################################################
 
 message(STATUS "")
-message(STATUS "=== srsLTE-Sniffer Build Configuration ===")
+message(STATUS "=== srsRAN-Sniffer Build Configuration ===")
 message(STATUS "  Version:        ${PROJECT_VERSION}")
 message(STATUS "  Build type:     ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C Compiler:     ${CMAKE_C_COMPILER}")
 message(STATUS "  Build tests:    ${BUILD_TESTS}")
 message(STATUS "  Build tools:    ${BUILD_TOOLS}")
+message(STATUS "  Build sniffer:  ${BUILD_SNIFFER}")
+message(STATUS "  srsRAN_4G:      ${SRSRAN_FOUND}")
 message(STATUS "  SQLite support: ${ENABLE_SQLITE}")
 message(STATUS "  JSON config:    ${ENABLE_JSON_CONFIG}")
 message(STATUS "  PCAP support:   ${ENABLE_PCAP}")

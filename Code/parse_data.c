@@ -8,7 +8,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 
-#include "srslte/phy/utils/vector.h"
+#include "srsran/phy/utils/vector.h"
 
 char* gettime(){
   time_t mytime = time(NULL);
