@@ -43,7 +43,7 @@
 #include <srsran/phy/common/phy_common.h>
 #include "srsran/phy/io/filesink.h"
 #include "srsran/srsran.h"
-#include "srsran/parse_data.c"
+#include "parse_data.c"
 #include "data_handler.h"
 
 #define ENABLE_AGC_DEFAULT

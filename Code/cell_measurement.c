@@ -41,7 +41,7 @@
 #include "srsran/phy/rf/rf.h"
 #include "srsran/phy/rf/rf_utils.h"
 #include "srsran/common/crash_handler.h"
-#include "srsran/parse_data.c"
+#include "parse_data.c"
 #include "sib_parser.h"
 
 cell_search_cfg_t cell_detect_config = {
