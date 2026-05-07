@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "srslte-sniffer"
+version = "2.0.0"
+description = "Modernised LTE/NR control-plane sniffer and analyzer (post-srsRAN_4G era)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "srsLTE-Sniffer contributors" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Security",
+    "Topic :: System :: Networking :: Monitoring",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "pycrate>=0.7.7",
+    "click>=8.1",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "jinja2>=3.1",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov>=4.1", "ruff>=0.4"]
+
+[project.scripts]
+srslte-sniffer = "srslte_sniffer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["srslte_sniffer*"]
+
+[tool.setuptools.package-data]
+srslte_sniffer = ["templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+python_files = "test_*.py"
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+extend-select = ["I", "B", "UP"]

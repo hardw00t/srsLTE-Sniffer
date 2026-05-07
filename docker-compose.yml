@@ -1,0 +1,22 @@
+services:
+  analyzer:
+    build:
+      context: .
+      target: python
+    image: srslte-sniffer:python
+    volumes:
+      - ./captures:/captures
+    command: srslte-sniffer --help
+
+  dashboard:
+    build:
+      context: .
+      target: python
+    image: srslte-sniffer:python
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./captures:/captures
+    command: srslte-sniffer dashboard --db /captures/captures.db --host 0.0.0.0 --port 8000
+    depends_on:
+      - analyzer

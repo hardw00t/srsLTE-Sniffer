@@ -1,4 +1,58 @@
-# Documentation for IMSI catcher
+# srsLTE-Sniffer
+
+> Active branch: **`claude/project-summary-fPHUU`** (v2 — additive, master is untouched).
+
+LTE / NR control-plane sniffer and analyzer. The original (archived) tool
+lives under [`Code/`](Code/) and [`Executables/`](Executables/) for
+reference; the v2 rewrite lives at the repo root and replaces the dead
+`srsLTE` upstream, the brittle hex-pattern parser, the `text2pcap`
+round-trip, and the CSV-only output.
+
+> **Capture is regulated or illegal in most jurisdictions** — read
+> [LEGAL.md](LEGAL.md) before doing anything that touches an antenna.
+> `srslte-sniffer scan` and `pdsch_sniffer` both refuse to run without
+> `--i-have-authorization`.
+
+## Quickstart (no SDR required)
+
+```bash
+pip install -e .
+srslte-sniffer analyze "Output Files/imsi.pcap" --db captures.db
+srslte-sniffer dashboard --db captures.db   # http://127.0.0.1:8000
+```
+
+## What's new in v2
+
+| Track | Status |
+|---|---|
+| 1. CMake + Docker + CI + srsRAN_4G port + typo fix | done |
+| 2. ASN.1 RRC decoder (replaces hex-pattern matching) | done — validated against 250k packets in the included demo capture |
+| 3. SIB2 capture, S-TMSI co-frame parsing | done |
+| 4. EARFCN scanner, SQLite store, FastAPI dashboard, crash-safe journal | done |
+| 5. TMSI tracker, rogue-eNB detector, 5G NR research-mode skeleton | done |
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design,
+[docs/MIGRATION.md](docs/MIGRATION.md) for the per-file change log,
+[docs/USAGE.md](docs/USAGE.md) for the CLI reference.
+
+## Layout
+
+```
+src/                  modernised C — pdsch_sniffer + cell_measurement
+python/srslte_sniffer faceset of the analyzer + decoder + dashboard
+python/tests/         pytest suite (49 tests, runs against demo capture)
+scripts/              loop_catcher.sh, dwell.sh
+cmake/                FindsrsRAN.cmake
+Code/, Executables/   legacy tree, kept verbatim
+Output Files/         legacy capture samples — used as test fixtures
+```
+
+---
+
+# Legacy README (archived)
+
+The text below is the original IMSI-catcher README, kept verbatim for
+historical reference.
 
 # BIG IMPORTANT NOTE
 Hi I don't have access to the equipment anymore so I can't maintain this. Hence, I'm archiving this unless I get the chance to again.

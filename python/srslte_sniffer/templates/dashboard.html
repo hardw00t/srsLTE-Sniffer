@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>srsLTE-Sniffer dashboard</title>
+<script src="https://unpkg.com/htmx.org@1.9.10"></script>
+<style>
+  body { font-family: ui-monospace, monospace; max-width: 1100px; margin: 2em auto; padding: 0 1em; }
+  h1 { font-size: 1.4em; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  td, th { padding: 4px 8px; border-bottom: 1px solid #eee; text-align: left; }
+  th { background: #f6f6f6; }
+  .stats { display: flex; gap: 1.5em; flex-wrap: wrap; }
+  .stat { background: #f8f8f8; padding: 1em; border-radius: 6px; min-width: 120px; }
+  .stat-num { font-size: 1.8em; font-weight: bold; }
+  nav a { margin-right: 1em; }
+  .banner { background: #fff3cd; border-left: 4px solid #ffc107; padding: 0.5em 1em; margin: 1em 0; font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>srsLTE-Sniffer v2 — dashboard</h1>
+  <div class="banner">
+    Capture and analysis is for authorised use only — see LEGAL.md.
+  </div>
+  <nav><a href="/">Overview</a> <a href="/imsis">IMSI leaderboard</a></nav>
+
+  <h2>Counts</h2>
+  <div class="stats" hx-get="/api/stats" hx-trigger="every 5s" hx-swap="none" id="counts">
+    <div class="stat"><div>Pagings</div><div class="stat-num">{{ stats.pagings }}</div></div>
+    <div class="stat"><div>IMSI</div><div class="stat-num">{{ stats.get('pagings_imsi', 0) }}</div></div>
+    <div class="stat"><div>S-TMSI</div><div class="stat-num">{{ stats.get('pagings_s-tmsi', 0) }}</div></div>
+    <div class="stat"><div>Cells</div><div class="stat-num">{{ stats.cells }}</div></div>
+    <div class="stat"><div>SIBs</div><div class="stat-num">{{ stats.sibs }}</div></div>
+  </div>
+
+  <h2>Recent pagings</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Kind</th><th>IMSI</th><th>MMEC</th><th>M-TMSI</th><th>EARFCN</th></tr></thead>
+    <tbody>
+    {% for r in recent %}
+      <tr>
+        <td>{{ r.ts_str }}</td>
+        <td>{{ r.kind }}</td>
+        <td>{{ r.imsi or '' }}</td>
+        <td>{{ r.mmec if r.mmec is not none else '' }}</td>
+        <td>{{ r.m_tmsi if r.m_tmsi is not none else '' }}</td>
+        <td>{{ r.earfcn if r.earfcn is not none else '' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>
