@@ -208,3 +208,16 @@ class CaptureDB:
         self._conn.executescript(
             "DELETE FROM pagings; DELETE FROM cells; DELETE FROM sibs;"
         )
+
+    def prune_older_than(self, ts_us_cutoff: int) -> dict[str, int]:
+        """Delete records with ts < cutoff. Returns counts per table."""
+        out = {}
+        for table in ("pagings", "cells", "sibs"):
+            cur = self._conn.execute(
+                f"DELETE FROM {table} WHERE ts < ?",
+                (ts_us_cutoff,),
+            )
+            out[table] = cur.rowcount
+        # SQLite needs an explicit VACUUM to reclaim space.
+        self._conn.execute("VACUUM")
+        return out

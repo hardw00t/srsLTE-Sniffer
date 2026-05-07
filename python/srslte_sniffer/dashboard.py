@@ -84,14 +84,38 @@ def make_app(
     db_path: str,
     *,
     pipeline: StreamingPipeline | None = None,
+    geo_db_path: str | None = None,
+    auth_token: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="srsLTE-Sniffer dashboard", version="2.0.0")
     hub = _Hub()
     if pipeline is not None:
         pipeline.subscribe(hub.publish)
 
+    if auth_token:
+        from fastapi import Request
+        from fastapi.responses import PlainTextResponse
+
+        @app.middleware("http")
+        async def _auth(request: Request, call_next):
+            # Allow the WS handshake to be authenticated via query string
+            # since browser WebSocket can't easily set custom headers.
+            if request.url.path == "/ws":
+                token = request.query_params.get("token")
+            else:
+                token = request.headers.get("x-auth-token")
+            if token != auth_token:
+                return PlainTextResponse("unauthorized", status_code=401)
+            return await call_next(request)
+
     def _db() -> CaptureDB:
         return CaptureDB(db_path)
+
+    def _geo():
+        if not geo_db_path:
+            return None
+        from .geo import GeoCache
+        return GeoCache(geo_db_path)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -137,6 +161,116 @@ def make_app(
         db = _db()
         try:
             return JSONResponse(db.recent_pagings(limit))
+        finally:
+            db.close()
+
+    @app.get("/api/timeseries")
+    def timeseries(bucket_seconds: int = 60, limit: int = 200):
+        """Bucket recent paging counts by time. Drives the sparkline on the
+        index page; also useful for any external consumer."""
+        bucket_us = bucket_seconds * 1_000_000
+        db = _db()
+        try:
+            rows = db._conn.execute(
+                "SELECT (ts / ?) AS bucket, kind, COUNT(*) AS n "
+                "FROM pagings GROUP BY bucket, kind "
+                "ORDER BY bucket DESC LIMIT ?",
+                (bucket_us, limit),
+            ).fetchall()
+            out: dict[int, dict[str, int]] = {}
+            for bucket, kind, n in rows:
+                out.setdefault(bucket * bucket_seconds, {})[kind] = n
+            return JSONResponse({
+                "bucket_seconds": bucket_seconds,
+                "series": [
+                    {"ts_seconds": ts, "counts": counts}
+                    for ts, counts in sorted(out.items())
+                ],
+            })
+        finally:
+            db.close()
+
+    @app.get("/cells/map", response_class=HTMLResponse)
+    def cells_map() -> str:
+        """Leaflet map of observed cells. Joins captures.cells with the
+        OpenCellID-derived cell_geo table."""
+        db = _db()
+        geo = _geo()
+        try:
+            cells_q = db._conn.execute(
+                "SELECT cell_id, plmn, tac FROM cells WHERE cell_id IS NOT NULL"
+            ).fetchall()
+            features = []
+            unmatched = 0
+            for cid, plmn, tac in cells_q:
+                if not (geo and plmn and tac):
+                    unmatched += 1
+                    continue
+                try:
+                    mcc, mnc = plmn.split("-")
+                    loc = geo.lookup(int(mcc), int(mnc), int(tac), int(cid))
+                    if loc:
+                        features.append({
+                            "cell_id": cid, "plmn": plmn, "tac": tac,
+                            "lon": loc.lon, "lat": loc.lat,
+                            "accuracy_m": loc.accuracy_m,
+                        })
+                    else:
+                        unmatched += 1
+                except (ValueError, TypeError):
+                    unmatched += 1
+            return _env.get_template("cells_map.html").render(
+                features=features, unmatched=unmatched,
+                geo_db_set=(geo is not None),
+            )
+        finally:
+            db.close()
+            if geo:
+                geo.close()
+
+    @app.get("/api/anomalies")
+    def anomalies(allowed_plmns: str | None = None):
+        """Run the rogue-eNB rules over the current DB snapshot."""
+        from .decoder import PagingRecord
+        from .rogue_detector import CellSnapshot, run_all
+        from .tracker import TimedPaging
+
+        db = _db()
+        try:
+            cells = []
+            for cid, plmn, tac, sip in db._conn.execute(
+                "SELECT cell_id, plmn, tac, si_periodicity FROM cells"
+            ).fetchall():
+                ipage = db._conn.execute(
+                    "SELECT COUNT(*) FROM pagings WHERE cell_id=? AND kind='imsi'",
+                    (cid,),
+                ).fetchone()[0]
+                spage = db._conn.execute(
+                    "SELECT COUNT(*) FROM pagings WHERE cell_id=? AND kind='s-tmsi'",
+                    (cid,),
+                ).fetchone()[0]
+                cells.append(CellSnapshot(
+                    cell_id=cid, plmn=plmn, tac=tac, si_periodicity=sip,
+                    paging_imsi_count=ipage, paging_stmsi_count=spage,
+                ))
+            timeline = [
+                TimedPaging(
+                    record=PagingRecord(
+                        kind=k, cn_domain=None,
+                        imsi=imsi, mmec=mmec, m_tmsi=mtmsi,
+                    ),
+                    ts_us=ts, cell_id=cid,
+                )
+                for ts, k, imsi, mmec, mtmsi, cid in db._conn.execute(
+                    "SELECT ts, kind, imsi, mmec, m_tmsi, cell_id FROM pagings"
+                ).fetchall()
+            ]
+            allowed = (
+                set(filter(None, allowed_plmns.split(",")))
+                if allowed_plmns else None
+            )
+            results = run_all(cells, timeline, allowed_plmns=allowed)
+            return JSONResponse([a.__dict__ for a in results])
         finally:
             db.close()
 

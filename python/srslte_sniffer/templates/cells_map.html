@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cell map — srsLTE-Sniffer</title>
+<link rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body { font-family: ui-monospace, monospace; margin: 0; }
+  #map { height: 80vh; width: 100%; }
+  header { padding: 0.5em 1em; background: #f6f6f6; border-bottom: 1px solid #ddd; }
+  .pill { display: inline-block; padding: 1px 6px; border-radius: 6px; font-size: 11px; margin-left: 6px;}
+  .warn { background: #fff3cd; color: #6e5a00; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Observed cells</strong>
+  <a href="/" style="margin-left: 1em;">← Overview</a>
+  <span class="pill {% if not geo_db_set %}warn{% endif %}">
+    {% if geo_db_set %}geo cache attached{% else %}no geo cache (start with --geo-db){% endif %}
+  </span>
+  <span class="pill warn">{{ unmatched }} unmatched</span>
+</header>
+<div id="map"></div>
+<script>
+  var features = {{ features | tojson }};
+  var map = L.map('map');
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap',
+    maxZoom: 19,
+  }).addTo(map);
+  if (features.length === 0) {
+    map.setView([20, 0], 2);
+  } else {
+    var bounds = [];
+    features.forEach(function(f) {
+      var marker = L.circleMarker([f.lat, f.lon], {
+        radius: 6, color: '#cc3333', fillOpacity: 0.6,
+      }).addTo(map);
+      marker.bindPopup(
+        '<b>cell ' + f.cell_id + '</b><br/>' +
+        'PLMN ' + f.plmn + '<br/>' +
+        'TAC ' + f.tac + '<br/>' +
+        'accuracy ±' + f.accuracy_m + ' m'
+      );
+      bounds.push([f.lat, f.lon]);
+    });
+    map.fitBounds(bounds, { padding: [40, 40] });
+  }
+</script>
+</body>
+</html>

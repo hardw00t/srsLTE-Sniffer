@@ -59,12 +59,20 @@ def analyze(input_path: str, db_path: str | None, earfcn: int | None,
 @click.option("--db", "db_path", required=True)
 @click.option("--port", default=8000, show_default=True)
 @click.option("--host", default="127.0.0.1", show_default=True)
-def dashboard(db_path: str, port: int, host: str) -> None:
+@click.option("--geo-db", "geo_db_path", default=None,
+              help="Optional OpenCellID-derived cache (see geo-import). "
+                   "Required for the /cells/map page.")
+@click.option("--auth-token", "auth_token", default=None,
+              envvar="SRSLTE_DASHBOARD_TOKEN",
+              help="Require X-Auth-Token header. Default: env "
+                   "SRSLTE_DASHBOARD_TOKEN. None = open access.")
+def dashboard(db_path: str, port: int, host: str,
+              geo_db_path: str | None, auth_token: str | None) -> None:
     """Serve the live dashboard."""
     import uvicorn
 
     from .dashboard import make_app
-    app = make_app(db_path)
+    app = make_app(db_path, geo_db_path=geo_db_path, auth_token=auth_token)
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
@@ -347,6 +355,113 @@ def redact(src: str, dst: str, preserve_mcc: bool) -> None:
 
     stats = redact_capture(src, dst, preserve_mcc=preserve_mcc)
     click.echo(json.dumps(stats.__dict__, indent=2))
+
+
+@main.command()
+@click.option("--db", "db_path", required=True)
+@click.option("--older-than", "older_than", required=True,
+              help="Delete records older than this duration "
+                   "(e.g. '30d', '12h', '7200s').")
+def prune(db_path: str, older_than: str) -> None:
+    """Delete records older than a duration. SQLite VACUUMs after."""
+    import re
+    import time
+
+    m = re.fullmatch(r"\s*(\d+)\s*([smhd])\s*", older_than)
+    if not m:
+        click.echo("--older-than format: <int>(s|m|h|d), e.g. 30d", err=True)
+        raise click.exceptions.Exit(1)
+    n = int(m.group(1))
+    unit = m.group(2)
+    seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    cutoff_us = int((time.time() - n * seconds) * 1e6)
+
+    db = CaptureDB(db_path)
+    try:
+        result = db.prune_older_than(cutoff_us)
+        click.echo(json.dumps(result, indent=2))
+    finally:
+        db.close()
+
+
+@main.command()
+@click.option("--config-dir", default="~/.srslte", show_default=True)
+def init(config_dir: str) -> None:
+    """Set up a sane working directory: config, demo decode, dashboard hint.
+
+    Removes the 'where do I start?' friction. Idempotent.
+    """
+    import os
+    from pathlib import Path
+
+    target = Path(os.path.expanduser(config_dir))
+    target.mkdir(parents=True, exist_ok=True)
+
+    cfg = target / "config.toml"
+    if not cfg.exists():
+        cfg.write_text(
+            "# srsLTE-Sniffer config — edit to taste.\n"
+            "[capture]\n"
+            "earfcns = [1300, 1600]\n"
+            "dwell_seconds = 240\n\n"
+            "[dashboard]\n"
+            "host = \"127.0.0.1\"\n"
+            "port = 8000\n"
+            "# auth_token = \"set me\"  # uncomment to require X-Auth-Token\n\n"
+            "[storage]\n"
+            "db = \"~/.srslte/captures.db\"\n"
+            "journal_dir = \"~/.srslte/journals\"\n"
+        )
+
+    journals = target / "journals"
+    journals.mkdir(exist_ok=True)
+
+    # Pre-seed by running the analyzer over the included demo capture if
+    # we can find it.
+    demo_paths = [
+        Path("Output Files") / "imsi.pcap",
+        Path("imsi_pcap_demo.txt"),
+    ]
+    seeded = False
+    for p in demo_paths:
+        if p.exists():
+            db_path = target / "captures.db"
+            from .analyzer import analyze_file
+            stats = analyze_file(str(p), db_path=str(db_path))
+            click.echo(f"Seeded demo capture from {p}: "
+                       f"{stats.pagings_total} pagings into {db_path}")
+            seeded = True
+            break
+
+    click.echo(json.dumps({
+        "config_dir": str(target),
+        "config_file": str(cfg),
+        "journals_dir": str(journals),
+        "seeded": seeded,
+        "next": [
+            f"srslte-sniffer dashboard --db {target}/captures.db",
+            "open http://127.0.0.1:8000",
+            "see docs/USAGE.md for capture mode",
+        ],
+    }, indent=2))
+
+
+@main.command()
+@click.option("--db", "db_path", required=True)
+@click.option("--port", default=9200, show_default=True)
+@click.option("--host", default="0.0.0.0", show_default=True)
+@click.option("--auth-token", "auth_token", default=None,
+              envvar="SRSLTE_HUB_TOKEN",
+              help="Required Bearer token for /ingest. "
+                   "Default: env SRSLTE_HUB_TOKEN.")
+def hub(db_path: str, port: int, host: str,
+        auth_token: str | None) -> None:
+    """Run the multi-node aggregation hub (receives pushes from sniffers)."""
+    import uvicorn
+
+    from .hub import make_hub_app
+    app = make_hub_app(db_path, auth_token=auth_token)
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 @main.command("geo-import")

@@ -26,6 +26,8 @@
 #include <time.h>
 
 #ifdef SRSRAN_AVAILABLE
+#include "srsran/phy/rf/rf.h"
+#include "srsran/phy/rf/rf_utils.h"
 #include "srsran/srsran.h"
 #endif
 
@@ -120,6 +122,10 @@ int main(int argc, char** argv)
         fprintf(stderr, "journal open failed\n"); return 3;
     }
 
+    /* RF receive callback adaptor — see sniffer.c for the rationale. */
+    /* This is a stripped copy because cell_measurement is a different
+     * binary; if the call signature drifts in srsRAN_4G, update both. */
+
     srsran_rf_t rf;
     if (srsran_rf_open_devname(&rf, NULL, a.rf_args, a.rf_nof_rx_ant)) {
         fprintf(stderr, "RF open failed\n"); return 4;
@@ -127,10 +133,17 @@ int main(int argc, char** argv)
     srsran_rf_set_rx_gain(&rf, a.rf_gain);
     srsran_rf_set_rx_freq(&rf, a.rf_nof_rx_ant, a.rf_freq);
 
-    srsran_cell_t cell = {0};
-    if (srsran_ue_cellsearch_scan_and_select_cell(&rf,
-                                                  a.rf_nof_rx_ant,
-                                                  &cell) < 0) {
+    cell_search_cfg_t cell_detect_config = {
+        .max_frames_pbch      = SRSRAN_DEFAULT_MAX_FRAMES_PBCH,
+        .max_frames_pss       = SRSRAN_DEFAULT_MAX_FRAMES_PSS,
+        .nof_valid_pss_frames = SRSRAN_DEFAULT_NOF_VALID_PSS_FRAMES,
+        .init_agc             = 0,
+        .force_tdd            = false,
+    };
+    srsran_cell_t cell     = {0};
+    float         cell_cfo = 0.0f;
+    if (rf_search_and_decode_mib(&rf, a.rf_nof_rx_ant, &cell_detect_config,
+                                 -1, &cell, &cell_cfo) < 0) {
         fprintf(stderr, "no cell\n"); return 5;
     }
 
@@ -146,23 +159,35 @@ int main(int argc, char** argv)
     srsran_ue_dl_cfg_t cfg     = {0};
     srsran_pdsch_cfg_t pdsch   = {0};
     srsran_dl_sf_cfg_t sf_cfg  = {0};
-    srsran_ue_sync_init_multi(&ue_sync, cell.nof_prb, false, NULL, NULL,
-                              a.rf_nof_rx_ant);
+
+    extern int srslte_rf_recv_wrapper(void*, cf_t*[SRSRAN_MAX_CHANNELS],
+                                      uint32_t, srsran_timestamp_t*);
+    srsran_ue_sync_init_multi_decim(
+        &ue_sync, cell.nof_prb, false, srslte_rf_recv_wrapper,
+        a.rf_nof_rx_ant, (void*)&rf, 1);
     srsran_ue_sync_set_cell(&ue_sync, cell);
     srsran_ue_dl_init(&ue_dl, NULL, cell.nof_prb, a.rf_nof_rx_ant);
     srsran_ue_dl_set_cell(&ue_dl, cell);
-    srsran_ue_dl_set_rnti(&ue_dl, SRSRAN_SIRNTI);
+    pdsch.rnti = SRSRAN_SIRNTI;
 
     uint8_t* data[SRSRAN_MAX_CODEWORDS] = {0};
     for (uint32_t i = 0; i < SRSRAN_MAX_CODEWORDS; ++i)
         data[i] = (uint8_t*)malloc(SRSRAN_MAX_BUFFER_SIZE_BYTES);
     bool acks[SRSRAN_MAX_CODEWORDS] = {false};
 
-    time_t deadline = time(NULL) + a.dwell_seconds;
+    cf_t* sample_buffers[SRSRAN_MAX_CHANNELS] = {0};
+    uint32_t max_num_samples =
+        SRSRAN_SF_LEN_PRB(cell.nof_prb) * a.rf_nof_rx_ant;
+    for (uint32_t i = 0; i < a.rf_nof_rx_ant; ++i)
+        sample_buffers[i] = (cf_t*)srsran_vec_cf_malloc(max_num_samples);
+
+    time_t deadline  = time(NULL) + a.dwell_seconds;
     bool   sib1_seen = false;
 
     while (!g_stop && time(NULL) < deadline) {
-        if (srsran_ue_sync_zerocopy(&ue_sync, NULL) != 1) continue;
+        if (srsran_ue_sync_zerocopy(&ue_sync, sample_buffers,
+                                    max_num_samples) != 1)
+            continue;
         sf_cfg.tti = srsran_ue_sync_get_sfidx(&ue_sync);
         int n = srsran_ue_dl_find_and_decode(&ue_dl, &sf_cfg, &cfg, &pdsch,
                                              data, acks);
@@ -187,6 +212,8 @@ int main(int argc, char** argv)
         sniffer_journal_write(&journal, kind, ts, data[0], (uint32_t)bytes);
     }
 
+    for (uint32_t i = 0; i < a.rf_nof_rx_ant; ++i)
+        if (sample_buffers[i]) free(sample_buffers[i]);
     for (uint32_t i = 0; i < SRSRAN_MAX_CODEWORDS; ++i) free(data[i]);
     srsran_ue_dl_free(&ue_dl);
     srsran_ue_sync_free(&ue_sync);

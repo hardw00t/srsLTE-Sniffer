@@ -1,0 +1,47 @@
+# Example Prometheus alert rules.
+# `amtool check-rules examples/alertmanager-rules.yml` to validate.
+
+groups:
+  - name: srslte-sniffer
+    rules:
+      - alert: HighIMSIPagingRate
+        expr: rate(srslte_pagings_total{kind="imsi"}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: high
+        annotations:
+          summary: "Suspicious IMSI paging rate"
+          description: |
+            Sustained IMSI paging rate above 5% — possible rogue cell
+            forcing reattach. Check /api/anomalies on the dashboard.
+
+      - alert: ExcessiveDecodeFailures
+        expr: rate(srslte_decode_failures_total[5m]) > 1
+        for: 10m
+        labels:
+          severity: medium
+        annotations:
+          summary: "Decoder failure rate elevated"
+          description: |
+            Could indicate RF SNR drop, antenna fault, or pycrate
+            extension drift after a 3GPP release bump.
+
+      - alert: BackpressureDrops
+        expr: rate(srslte_pipeline_dropped_total[1m]) > 0
+        for: 2m
+        labels:
+          severity: low
+        annotations:
+          summary: "Streaming pipeline dropping events"
+          description: |
+            Increase --workers / --queue-size or move the analyzer to
+            a faster host.
+
+      - alert: AnomalyHighSeverity
+        expr: increase(srslte_anomaly_events_total{severity="high"}[10m]) > 0
+        labels:
+          severity: high
+        annotations:
+          summary: "High-severity rogue-eNB anomaly fired"
+          description: |
+            Inspect rule={{ $labels.rule }} via `srslte-sniffer detect`.

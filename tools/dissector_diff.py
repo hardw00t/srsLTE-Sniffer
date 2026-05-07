@@ -28,7 +28,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "python"))
 
 from srslte_sniffer.decoder import decode_pcch, extract_paging_records  # noqa: E402
-from srslte_sniffer.pcap_io import HEADER_LEN, read_capture  # noqa: E402
+from srslte_sniffer.pcap_io import read_capture  # noqa: E402
 
 
 def _have_tshark() -> bool:

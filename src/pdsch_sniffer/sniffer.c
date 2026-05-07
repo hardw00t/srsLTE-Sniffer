@@ -44,6 +44,7 @@
 #ifdef SRSRAN_AVAILABLE
 #include "srsran/phy/io/filesink.h"
 #include "srsran/phy/rf/rf.h"
+#include "srsran/phy/rf/rf_utils.h"
 #include "srsran/srsran.h"
 #endif
 
@@ -65,6 +66,11 @@ typedef struct {
     int         dwell_seconds;
     /* Authorisation */
     bool        i_have_authorization;
+    /* Dry-run: synthesize test PDUs into journal+pcap and exit, without
+     * touching the radio. Used for CI end-to-end checks of the binary
+     * path that don't require srsRAN_4G or RF kit. */
+    bool        dry_run;
+    int         dry_run_count;
 } prog_args_t;
 
 static void args_default(prog_args_t* a)
@@ -81,6 +87,8 @@ static void args_default(prog_args_t* a)
     a->emit_journal         = true;
     a->dwell_seconds        = 240;
     a->i_have_authorization = false;
+    a->dry_run              = false;
+    a->dry_run_count        = 100;
 }
 
 static void usage(const char* argv0)
@@ -113,6 +121,10 @@ static bool parse_args(int argc, char** argv, prog_args_t* a)
             a->i_have_authorization = true;
             continue;
         }
+        if (!strcmp(opt, "--dry-run")) {
+            a->dry_run = true;
+            continue;
+        }
         if (i + 1 >= argc) {
             fprintf(stderr, "missing value for %s\n", opt);
             return false;
@@ -134,16 +146,73 @@ static bool parse_args(int argc, char** argv, prog_args_t* a)
             a->pcap_path = val;
         } else if (!strcmp(opt, "-t")) {
             a->dwell_seconds = atoi(val);
+        } else if (!strcmp(opt, "--dry-run-count")) {
+            a->dry_run_count = atoi(val);
         } else {
             fprintf(stderr, "unknown option: %s\n", opt);
             return false;
         }
     }
-    if (a->rf_freq <= 0.0) {
+    if (!a->dry_run && a->rf_freq <= 0.0) {
         fprintf(stderr, "missing -f <freq_hz>\n");
         return false;
     }
     return true;
+}
+
+static uint64_t now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
+}
+
+/* Synthesize a small set of valid PCCH-Message UPER PDUs into the
+ * journal + pcap. Used by --dry-run so the binary's I/O paths can be
+ * exercised end-to-end in CI without an SDR or srsRAN_4G.
+ *
+ * The PDUs are real captures from imsi_pcap_demo.txt — known to decode
+ * cleanly in the Python analyzer. */
+static const uint8_t DRY_RUN_PDUS[][14] = {
+    /* S-TMSI single-record */
+    {0x40,0x01,0x6c,0x44,0x5a,0x82,0x00,0xda,0xbf,0x69,0x60,0x45,0x00,0x00},
+    /* Different S-TMSI */
+    {0x40,0x01,0x6e,0x44,0xf3,0x55,0x10,0x98,0x45,0xff,0x60,0x45,0x00,0x00},
+    /* Yet another */
+    {0x40,0x01,0x5c,0x25,0x0b,0xa0,0xa0,0xb3,0x23,0xa3,0x60,0x45,0x00,0x00},
+};
+#define DRY_RUN_PDU_LEN 14
+#define DRY_RUN_PDU_VARIANTS \
+    (sizeof(DRY_RUN_PDUS) / sizeof(DRY_RUN_PDUS[0]))
+
+static int run_dry(const prog_args_t* a)
+{
+    sniffer_pcap_t    pcap   = {0};
+    sniffer_journal_t journal = {0};
+    if (a->emit_pcap && sniffer_pcap_open(&pcap, a->pcap_path) < 0) {
+        fprintf(stderr, "pcap open failed: %s\n", a->pcap_path);
+        return 3;
+    }
+    if (a->emit_journal && sniffer_journal_open(&journal, a->journal_path) < 0) {
+        fprintf(stderr, "journal open failed: %s\n", a->journal_path);
+        sniffer_pcap_close(&pcap);
+        return 3;
+    }
+    int n = a->dry_run_count > 0 ? a->dry_run_count : 100;
+    for (int i = 0; i < n; ++i) {
+        const uint8_t* pdu = DRY_RUN_PDUS[i % DRY_RUN_PDU_VARIANTS];
+        uint64_t       ts  = now_us() + (uint64_t)i;
+        if (a->emit_pcap)
+            sniffer_pcap_write_pcch(&pcap, pdu, DRY_RUN_PDU_LEN, ts);
+        if (a->emit_journal)
+            sniffer_journal_write(&journal, SNIFFER_JOURNAL_PCCH,
+                                  ts, pdu, DRY_RUN_PDU_LEN);
+    }
+    sniffer_pcap_close(&pcap);
+    sniffer_journal_close(&journal);
+    fprintf(stderr, "dry-run: wrote %d PCCH records to %s + %s\n",
+            n, a->pcap_path, a->journal_path);
+    return 0;
 }
 
 static volatile sig_atomic_t g_stop = 0;
@@ -152,13 +221,6 @@ static void on_signal(int sig)
 {
     (void)sig;
     g_stop = 1;
-}
-
-static uint64_t now_us(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
 }
 
 /* ------------------------------------------------------------------ */
@@ -173,10 +235,12 @@ int main(int argc, char** argv)
 {
     prog_args_t a;
     if (!parse_args(argc, argv, &a)) return 1;
+    if (a.dry_run) return run_dry(&a);
     fprintf(stderr,
         "sniffer was built without SRSRAN_AVAILABLE — capture mode is "
         "disabled in this binary. Rebuild with srsRAN_4G installed to "
-        "enable RF capture. (--help works either way.)\n");
+        "enable RF capture, or pass --dry-run to synthesize a journal + "
+        "pcap from a built-in PDU set. (--help works either way.)\n");
     return 2;
 }
 #else  /* SRSRAN_AVAILABLE */
@@ -199,10 +263,33 @@ static void emit_pcch(sink_t* s, const uint8_t* pdu, size_t len)
                               ts, pdu, (uint32_t)len);
 }
 
+/* RF receive callback adaptor — bridges srsran_rf to the ue_sync API.
+ * Modelled on the equivalent helper in srsRAN_4G's pdsch_ue.c example.
+ *
+ * Important: the callback signature must match what
+ * srsran_ue_sync_init_multi_decim expects. See ue_sync.h for the typedef.
+ */
+static int srslte_rf_recv_wrapper(void*               h,
+                                  cf_t*               data[SRSRAN_MAX_CHANNELS],
+                                  uint32_t            nsamples,
+                                  srsran_timestamp_t* t)
+{
+    void* ptr[SRSRAN_MAX_CHANNELS] = {0};
+    for (uint32_t i = 0; i < SRSRAN_MAX_CHANNELS; ++i) {
+        ptr[i] = data[i];
+    }
+    return srsran_rf_recv_with_time_multi(
+        (srsran_rf_t*)h, ptr, nsamples, true,
+        t ? &t->full_secs : NULL,
+        t ? &t->frac_secs : NULL);
+}
+
 int main(int argc, char** argv)
 {
     prog_args_t a;
     if (!parse_args(argc, argv, &a)) return 1;
+    if (a.dry_run) return run_dry(&a);
+
     if (!a.i_have_authorization) {
         fprintf(stderr,
             "Refusing to capture: pass --i-have-authorization once you have "
@@ -233,6 +320,10 @@ int main(int argc, char** argv)
     sink.journal = &journal;
 
     /* ---- RF + DSP setup (srsRAN_4G) -------------------------------- */
+    /* This setup follows lib/examples/pdsch_ue.c in srsRAN_4G master.
+     * APIs verified against the master headers as of the v2.2 commit.
+     * If srsRAN_4G drifts, this is the surface to update. See
+     * docs/HIL_VALIDATION.md for the bring-up runbook. */
 
     srsran_rf_t rf;
     if (srsran_rf_open_devname(&rf, a.rf_dev, a.rf_args, a.rf_nof_rx_ant)) {
@@ -242,10 +333,20 @@ int main(int argc, char** argv)
     srsran_rf_set_rx_gain(&rf, a.rf_gain);
     srsran_rf_set_rx_freq(&rf, a.rf_nof_rx_ant, a.rf_freq);
 
-    srsran_cell_t cell = {0};
-    if (srsran_ue_cellsearch_scan_and_select_cell(&rf,
-                                                  a.rf_nof_rx_ant,
-                                                  &cell) < 0) {
+    /* Cell search uses rf_search_and_decode_mib() from rf_utils.h —
+     * that's the helper srsRAN_4G's own pdsch_ue example uses. */
+    cell_search_cfg_t cell_detect_config = {
+        .max_frames_pbch      = SRSRAN_DEFAULT_MAX_FRAMES_PBCH,
+        .max_frames_pss       = SRSRAN_DEFAULT_MAX_FRAMES_PSS,
+        .nof_valid_pss_frames = SRSRAN_DEFAULT_NOF_VALID_PSS_FRAMES,
+        .init_agc             = 0,
+        .force_tdd            = false,
+    };
+    srsran_cell_t cell        = {0};
+    float         cell_cfo    = 0.0f;
+    int           force_n_id2 = -1;  /* search all */
+    if (rf_search_and_decode_mib(&rf, a.rf_nof_rx_ant, &cell_detect_config,
+                                 force_n_id2, &cell, &cell_cfo) < 0) {
         fprintf(stderr, "no cell found at %.0f Hz\n", a.rf_freq);
         srsran_rf_close(&rf);
         sniffer_pcap_close(&pcap);
@@ -253,23 +354,37 @@ int main(int argc, char** argv)
         return 5;
     }
 
-    srsran_ue_sync_t  ue_sync = {0};
-    srsran_ue_mib_t   ue_mib  = {0};
-    srsran_ue_dl_t    ue_dl   = {0};
-    srsran_ue_dl_cfg_t   ue_dl_cfg   = {0};
-    srsran_pdsch_cfg_t   pdsch_cfg   = {0};
-    srsran_dl_sf_cfg_t   sf_cfg      = {0};
+    srsran_ue_sync_t   ue_sync   = {0};
+    srsran_ue_dl_t     ue_dl     = {0};
+    srsran_ue_dl_cfg_t ue_dl_cfg = {0};
+    srsran_pdsch_cfg_t pdsch_cfg = {0};
+    srsran_dl_sf_cfg_t sf_cfg    = {0};
 
-    if (srsran_ue_sync_init_multi(&ue_sync, cell.nof_prb, false,
-                                  NULL, NULL, a.rf_nof_rx_ant) < 0)
+    /* srsran_ue_sync_init_multi_decim: 7-arg signature in master.
+     * args: (q, max_prb, search_cell, recv_cb, nof_rx_antennas,
+     *        stream_handler, decimate). */
+    if (srsran_ue_sync_init_multi_decim(&ue_sync,
+                                        cell.nof_prb,
+                                        false,
+                                        srslte_rf_recv_wrapper,
+                                        a.rf_nof_rx_ant,
+                                        (void*)&rf,
+                                        1) < 0)
         goto fatal;
     if (srsran_ue_sync_set_cell(&ue_sync, cell) < 0)
         goto fatal;
+
+    /* srsran_ue_dl_init: 4-arg signature.
+     * `sf_buffer` is the input buffer array; we pass NULL because
+     * find_and_decode reads via the ue_sync zerocopy path. */
     if (srsran_ue_dl_init(&ue_dl, NULL, cell.nof_prb, a.rf_nof_rx_ant) < 0)
         goto fatal;
     if (srsran_ue_dl_set_cell(&ue_dl, cell) < 0)
         goto fatal;
-    srsran_ue_dl_set_rnti(&ue_dl, a.rnti);
+
+    /* RNTI is set on pdsch_cfg, not via a separate ue_dl_set_rnti() —
+     * that function does not exist in current srsRAN_4G. */
+    pdsch_cfg.rnti = a.rnti;
 
     /* ---- Capture loop --------------------------------------------- */
 
@@ -278,10 +393,21 @@ int main(int argc, char** argv)
         data[i] = (uint8_t*)malloc(SRSRAN_MAX_BUFFER_SIZE_BYTES);
     bool acks[SRSRAN_MAX_CODEWORDS] = {false};
 
+    /* Per-subframe sample buffer that we hand to ue_sync_zerocopy. */
+    cf_t*    sample_buffers[SRSRAN_MAX_CHANNELS] = {0};
+    uint32_t max_num_samples =
+        SRSRAN_SF_LEN_PRB(cell.nof_prb) * a.rf_nof_rx_ant;
+    for (uint32_t i = 0; i < a.rf_nof_rx_ant; ++i)
+        sample_buffers[i] =
+            (cf_t*)srsran_vec_cf_malloc(max_num_samples);
+
     time_t deadline = time(NULL) + a.dwell_seconds;
 
     while (!g_stop && time(NULL) < deadline) {
-        int n = srsran_ue_sync_zerocopy(&ue_sync, NULL);
+        /* Three-arg zerocopy: q, buffer-array, max-num-samples. */
+        int n = srsran_ue_sync_zerocopy(&ue_sync,
+                                        sample_buffers,
+                                        max_num_samples);
         if (n < 0) continue;
         if (n != 1) continue;
 
@@ -301,6 +427,8 @@ int main(int argc, char** argv)
         }
     }
 
+    for (uint32_t i = 0; i < a.rf_nof_rx_ant; ++i)
+        if (sample_buffers[i]) free(sample_buffers[i]);
     for (uint32_t i = 0; i < SRSRAN_MAX_CODEWORDS; ++i)
         free(data[i]);
 
