@@ -112,3 +112,40 @@ def extract_nr_paging_records(result: NRPCCHResult) -> list[NRPagingRecord]:
 
 def is_nr_available() -> bool:
     return _NR_OK
+
+
+def extract_wide_paging_records(result: NRPCCHResult,
+                                *, sa: bool = True):
+    """Generation-agnostic wrapper — returns a list of WidePagingRecord
+    so the analyzer can mix 5G with 2G/3G/4G entries.
+
+    ``sa=True`` tags records as ``5g-sa`` (SUPI is encrypted; only S-TMSI/
+    I-RNTI surface). ``sa=False`` tags as ``5g-nsa`` for NSA traffic that
+    rides on LTE — though in practice NSA paging still arrives via the
+    LTE PCCH path and would be processed by ``decoder.decode_pcch``
+    instead. NSA support here is for future combined-radio workflows.
+    """
+    from .decoder_common import WidePagingRecord
+
+    radio = "5g-sa" if sa else "5g-nsa"
+    raw_records = extract_nr_paging_records(result)
+    out = []
+    for r in raw_records:
+        if r.kind == "ng-5g-s-tmsi":
+            out.append(WidePagingRecord(
+                radio_type=radio, kind="ng-5g-s-tmsi",
+                ng_5g_s_tmsi=r.ng5g_s_tmsi,
+            ))
+        elif r.kind == "fulli-rnti":
+            out.append(WidePagingRecord(
+                radio_type=radio, kind="full-i-rnti",
+                full_i_rnti=r.full_i_rnti,
+            ))
+        elif r.kind == "i-rnti":
+            out.append(WidePagingRecord(
+                radio_type=radio, kind="i-rnti",
+                i_rnti=r.i_rnti,
+            ))
+        else:
+            out.append(WidePagingRecord(radio_type=radio, kind="unknown"))
+    return out

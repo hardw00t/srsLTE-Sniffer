@@ -32,6 +32,7 @@ enable_testing()
 
 add_subdirectory(src/pdsch_sniffer)
 add_subdirectory(src/cell_measurement)
+add_subdirectory(src/nr_sniffer)
 
 # A meta-target that runs the python tests too. We use `python3 -m pytest`
 # so we pick up the same interpreter that has the project's deps installed.
