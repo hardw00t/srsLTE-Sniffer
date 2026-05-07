@@ -1,0 +1,72 @@
+# Hardware-in-the-loop test stack: srsenb + srsue (over ZMQ virtual radio)
+# + the v2 sniffer. Brings up a private LTE network in containers — no
+# real RF, no licence required.
+#
+# Run with:
+#     docker compose -f tests/hil/docker-compose.yml up --abort-on-container-exit
+#
+# This file is intentionally separate from the top-level docker-compose.yml
+# because it requires the heavyweight 'full' image (srsRAN_4G + UHD).
+
+services:
+  enb:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: full
+    image: srslte-sniffer:full
+    command: >
+      srsenb
+      --rf.device_name=zmq
+      --rf.device_args="fail_on_disconnect=true,
+                        tx_port=tcp://*:2000,
+                        rx_port=tcp://ue:2001,
+                        id=enb,base_srate=23.04e6"
+      --enb.mcc=001 --enb.mnc=01
+    ports: ["2000:2000"]
+    networks: [hil]
+
+  ue:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: full
+    image: srslte-sniffer:full
+    command: >
+      srsue
+      --rf.device_name=zmq
+      --rf.device_args="tx_port=tcp://*:2001,
+                        rx_port=tcp://enb:2000,
+                        id=ue,base_srate=23.04e6"
+      --usim.imsi=001010123456789
+      --usim.k=00112233445566778899aabbccddeeff
+    depends_on: [enb]
+    networks: [hil]
+
+  sniffer:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: full
+    image: srslte-sniffer:full
+    command: >
+      sh -c "
+        sleep 10 &&
+        /usr/local/bin/pdsch_sniffer
+          -f 2680000000
+          -t 60
+          -j /captures/hil.journal
+          -p /captures/hil.pcapng
+          --i-have-authorization &&
+        srslte-sniffer journal-replay /captures/hil.journal
+          --db /captures/hil.db &&
+        srslte-sniffer track --db /captures/hil.db | tee /captures/track.json
+      "
+    volumes:
+      - ./captures:/captures
+    depends_on: [enb, ue]
+    networks: [hil]
+
+networks:
+  hil:
+    driver: bridge

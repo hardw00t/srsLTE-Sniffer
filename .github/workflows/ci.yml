@@ -57,6 +57,16 @@ jobs:
               --db /tmp/captures.db
           srslte-sniffer track --db /tmp/captures.db | head -50
           srslte-sniffer detect --db /tmp/captures.db | head -50
+      - name: Decoder benchmark (regression watch)
+        run: python3 tools/benchmark.py --limit 5000
+      - name: Streaming pipeline smoke
+        run: |
+          srslte-sniffer simulate imsi_pcap_demo.txt /tmp/sim.journal --rate 0 --limit 500
+          test -s /tmp/sim.journal
+      - name: Redactor round-trip
+        run: |
+          srslte-sniffer redact "Output Files/imsi.pcap" /tmp/red.pcapng
+          srslte-sniffer analyze /tmp/red.pcapng --db /tmp/red.db
 
   docker:
     runs-on: ubuntu-latest

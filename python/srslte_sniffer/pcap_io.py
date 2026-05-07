@@ -22,11 +22,13 @@ from collections.abc import Iterator
 from pathlib import Path
 
 # 15-byte MAC-LTE pseudo-header srsLTE prepends to each PCCH/SIB dump.
-# The first byte (0x01) is a magic, the rest carries channel/RNTI/etc fields.
-PAGING_HEADER = bytes.fromhex("0101010202fffe030000040000070101")[:15]
-SIB1_HEADER = bytes.fromhex("0101040202ffff0300000409050701010000")[:15]
-SIB2_HEADER = bytes.fromhex("01010402ffff0300000a120701010000")[:15]
+# Discriminator bytes (paging vs SIB1 vs SIB2) are at positions 2, 5, 10.
+# These constants must agree byte-for-byte with src/pdsch_sniffer/pcap_writer.c.
+PAGING_HEADER = bytes.fromhex("01010102fffe030000040000070101")
+SIB1_HEADER = bytes.fromhex("01010402ffff030000040905070101")
+SIB2_HEADER = bytes.fromhex("01010402ffff030000040a12070101")
 HEADER_LEN = 15
+assert len(PAGING_HEADER) == 15 and len(SIB1_HEADER) == 15 and len(SIB2_HEADER) == 15
 
 # pcap link-layer types
 DLT_USER0 = 147
@@ -135,13 +137,56 @@ def read_pcap(path: str | Path) -> Iterator[CapturedFrame]:
         yield from _read_pcap(fh)
 
 
+def _read_pcapng(fh: io.BufferedReader) -> Iterator[CapturedFrame]:
+    """Minimal pcapng reader — Section Header Block + Interface Description
+    Block + Enhanced Packet Blocks. Matches what PcapngWriter writes."""
+    # Endianness from the SHB byte-order magic.
+    fh.seek(0)
+    while True:
+        head = fh.read(8)
+        if len(head) < 8:
+            return
+        bt, blen = struct.unpack("<II", head)
+        if blen < 12:
+            return  # corrupt
+        body = fh.read(blen - 12)
+        trailer = fh.read(4)
+        if len(trailer) < 4:
+            return
+        if bt == 0x0A0D0D0A:
+            # SHB — confirm BE/LE; we only emit LE so just verify.
+            if len(body) >= 4:
+                magic = struct.unpack("<I", body[:4])[0]
+                if magic != 0x1A2B3C4D:
+                    return
+        elif bt == 0x00000006 and len(body) >= 20:
+            # EPB: iface(4) ts_high(4) ts_low(4) cap_len(4) orig_len(4) data...
+            (_iface, ts_h, ts_l, cap_len, _orig) = struct.unpack(
+                "<IIIII", body[:20]
+            )
+            data = body[20 : 20 + cap_len]
+            ts_us = (ts_h << 32) | ts_l
+            header = data[:HEADER_LEN]
+            payload = data[HEADER_LEN:]
+            yield CapturedFrame(
+                payload=payload,
+                raw=data,
+                framing=classify(header),
+                timestamp_us=ts_us,
+            )
+        # Other block types (IDB, etc.) are skipped silently.
+
+
 def read_capture(path: str | Path) -> Iterator[CapturedFrame]:
-    """Auto-detect text vs pcap and dispatch."""
+    """Auto-detect text vs pcap vs pcapng and dispatch."""
     p = Path(path)
     with p.open("rb") as fh:
         magic = fh.read(4)
     if magic in (b"\xd4\xc3\xb2\xa1", b"\xa1\xb2\xc3\xd4"):
         yield from read_pcap(p)
+    elif magic == b"\n\r\r\n":
+        with p.open("rb") as fh:
+            yield from _read_pcapng(fh)
     elif magic[:1] == b"\n" or magic.lstrip().startswith(b"0000") or all(
         c in b"0123456789abcdefABCDEF \t\r\n" for c in magic
     ):

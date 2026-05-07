@@ -15,10 +15,18 @@
   .stat-num { font-size: 1.8em; font-weight: bold; }
   nav a { margin-right: 1em; }
   .banner { background: #fff3cd; border-left: 4px solid #ffc107; padding: 0.5em 1em; margin: 1em 0; font-size: 13px; }
+  .pill { display: inline-block; padding: 1px 6px; border-radius: 6px; font-size: 11px; }
+  .pill.live { background: #d4edda; color: #155724; }
+  .pill.batch { background: #e2e3e5; color: #383d41; }
+  #live-feed { font-size: 12px; max-height: 240px; overflow: auto; background: #fafafa;
+               border: 1px solid #eee; padding: 6px; }
+  #live-feed div { padding: 2px 4px; border-bottom: 1px dashed #eee; }
 </style>
 </head>
 <body>
-  <h1>srsLTE-Sniffer v2 — dashboard</h1>
+  <h1>srsLTE-Sniffer v2 — dashboard
+    {% if streaming %}<span class="pill live">live</span>{% else %}<span class="pill batch">batch</span>{% endif %}
+  </h1>
   <div class="banner">
     Capture and analysis is for authorised use only — see LEGAL.md.
   </div>
@@ -32,6 +40,37 @@
     <div class="stat"><div>Cells</div><div class="stat-num">{{ stats.cells }}</div></div>
     <div class="stat"><div>SIBs</div><div class="stat-num">{{ stats.sibs }}</div></div>
   </div>
+
+  {% if streaming %}
+  <h2>Live feed</h2>
+  <div id="live-feed"><em>connecting…</em></div>
+  <script>
+    (function() {
+      var feed = document.getElementById('live-feed');
+      feed.innerHTML = '';
+      var url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+      var ws = new WebSocket(url);
+      ws.onmessage = function(ev) {
+        var data = JSON.parse(ev.data);
+        var line = document.createElement('div');
+        var when = new Date(data.ts_us / 1000).toISOString().substr(11, 12);
+        var kinds = (data.records || []).map(function(r) {
+          if (r.kind === 'imsi') return 'IMSI ' + (r.imsi || '');
+          if (r.kind === 's-tmsi') return 'S-TMSI ' + r.mmec + ':' + r.m_tmsi;
+          return r.kind;
+        }).join(', ') || '(no records)';
+        line.textContent = when + ' ' + (data.decode_ok ? 'OK ' : 'ERR ') + kinds;
+        feed.insertBefore(line, feed.firstChild);
+        while (feed.childNodes.length > 200) feed.removeChild(feed.lastChild);
+      };
+      ws.onclose = function() {
+        var line = document.createElement('div');
+        line.textContent = '— socket closed —';
+        feed.insertBefore(line, feed.firstChild);
+      };
+    })();
+  </script>
+  {% endif %}
 
   <h2>Recent pagings</h2>
   <table>

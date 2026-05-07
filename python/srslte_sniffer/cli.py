@@ -230,6 +230,143 @@ def journal_replay(journal_path: str, db_path: str | None) -> None:
 
 
 @main.command()
+@click.argument("journal_path", type=click.Path(dir_okay=False))
+@click.option("--db", "db_path", default=None,
+              help="Optional SQLite store updated as records arrive.")
+@click.option("--workers", type=int, default=2, show_default=True)
+@click.option("--queue-size", type=int, default=1024, show_default=True)
+def stream(journal_path: str, db_path: str | None,
+           workers: int, queue_size: int) -> None:
+    """Tail a journal in real time, decode, print JSON-lines.
+
+    Pair with `dashboard --stream-journal` to push events to the WS feed.
+    """
+    import asyncio
+    import sys
+
+    from .streaming import StreamingPipeline
+
+    pipeline = StreamingPipeline(
+        journal_path,
+        decoder_workers=workers,
+        queue_size=queue_size,
+    )
+
+    db = CaptureDB(db_path) if db_path else None
+
+    def on_event(ev) -> None:
+        line = {
+            "ts_us": ev.ts_us, "kind": ev.kind, "ok": ev.decode_ok,
+            "records": [
+                {"kind": r.kind, "imsi": r.imsi,
+                 "mmec": r.mmec, "m_tmsi": r.m_tmsi}
+                for r in ev.records
+            ],
+        }
+        click.echo(json.dumps(line))
+        sys.stdout.flush()
+        if db:
+            for r in ev.records:
+                db.insert_paging(r.hashed())
+
+    pipeline.subscribe(on_event)
+    try:
+        asyncio.run(pipeline.run())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if db:
+            db.close()
+
+
+@main.command()
+@click.argument("capture_path", type=click.Path(exists=True, dir_okay=False))
+@click.argument("journal_path", type=click.Path(dir_okay=False))
+@click.option("--rate", type=float, default=100.0, show_default=True,
+              help="Records/sec to write. 0 = as fast as possible.")
+@click.option("--limit", type=int, default=None,
+              help="Stop after N records. Default: replay everything.")
+def simulate(capture_path: str, journal_path: str,
+             rate: float, limit: int | None) -> None:
+    """Replay a saved capture into a journal — drives streaming end-to-end
+    without RF kit. Useful for demos, integration tests, dashboard bring-up.
+    """
+    from .simulator import replay_sync
+
+    n = replay_sync(capture_path, journal_path, rate_hz=rate, limit=limit)
+    click.echo(f"wrote {n} records to {journal_path}")
+
+
+@main.command()
+@click.option("--db", "db_path", required=True)
+@click.option("--port", default=9100, show_default=True)
+@click.option("--host", default="0.0.0.0", show_default=True)
+@click.option("--journal", "journal_path", default=None,
+              help="Optional journal to tail for live metrics.")
+def metrics(db_path: str, port: int, host: str,
+            journal_path: str | None) -> None:
+    """Serve Prometheus metrics on /metrics.
+
+    With ``--journal`` the metrics include live pipeline counters; without
+    it they reflect snapshot-on-scrape DB state.
+    """
+    import asyncio
+    import threading
+
+    import uvicorn
+
+    from .metrics import Metrics, make_metrics_app
+    from .streaming import StreamingPipeline
+
+    m = Metrics()
+    pipeline = None
+    if journal_path:
+        pipeline = StreamingPipeline(journal_path)
+        m.bind_pipeline(pipeline)
+        loop = asyncio.new_event_loop()
+
+        def _runner() -> None:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(pipeline.run())
+
+        threading.Thread(target=_runner, daemon=True).start()
+
+    app = make_metrics_app(m)
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+@main.command()
+@click.argument("src", type=click.Path(exists=True, dir_okay=False))
+@click.argument("dst", type=click.Path(dir_okay=False))
+@click.option("--preserve-mcc/--no-preserve-mcc", default=True,
+              show_default=True,
+              help="Keep MCC in IMSIs (network-shape preserved).")
+def redact(src: str, dst: str, preserve_mcc: bool) -> None:
+    """Rewrite a capture replacing IMSI/M-TMSI with hash-derived dummies."""
+    from .redact import redact_capture
+
+    stats = redact_capture(src, dst, preserve_mcc=preserve_mcc)
+    click.echo(json.dumps(stats.__dict__, indent=2))
+
+
+@main.command("geo-import")
+@click.argument("csv_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--db", "geo_db", default="cell_geo.db", show_default=True)
+def geo_import(csv_path: str, geo_db: str) -> None:
+    """Load an OpenCellID-format CSV into the geo cache."""
+    from .geo import GeoCache
+
+    cache = GeoCache(geo_db)
+    try:
+        n = cache.import_opencellid_csv(csv_path)
+        click.echo(json.dumps({"imported": n,
+                               "total_in_cache": cache.count()},
+                              indent=2))
+    finally:
+        cache.close()
+
+
+@main.command()
 @click.option("--earfcns", required=True,
               help="Comma-separated EARFCN list, e.g. 1450,1750")
 @click.option("--dwell", type=float, default=60.0, show_default=True)

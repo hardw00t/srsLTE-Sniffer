@@ -4,21 +4,25 @@ Run:  srslte-sniffer dashboard --db captures.db --port 8000
 
 Renders:
     /            — overview (counts, recent pagings)
-    /cells       — observed cells (SIB1)
     /imsis       — IMSI leaderboard with first/last seen
     /api/stats   — JSON for HTMX polling
+    /ws          — live WebSocket stream of decoded events when a journal
+                   is being tailed (see `srslte-sniffer stream`)
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
+import json
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .db import CaptureDB
+from .streaming import StreamEvent, StreamingPipeline
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _env = Environment(
@@ -36,8 +40,55 @@ def _fmt_ts(us: int | None) -> str:
         return str(us)
 
 
-def make_app(db_path: str) -> FastAPI:
+class _Hub:
+    """In-process pub/sub for WebSocket clients. Each `StreamingPipeline`
+    publishes to it; each WS client subscribes for its lifetime."""
+
+    def __init__(self) -> None:
+        self._subs: set[asyncio.Queue[str]] = set()
+
+    def subscribe(self) -> asyncio.Queue[str]:
+        q: asyncio.Queue[str] = asyncio.Queue(256)
+        self._subs.add(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue[str]) -> None:
+        self._subs.discard(q)
+
+    def publish(self, ev: StreamEvent) -> None:
+        msg = json.dumps(
+            {
+                "ts_us": ev.ts_us,
+                "kind": ev.kind,
+                "decode_ok": ev.decode_ok,
+                "records": [
+                    {
+                        "kind": r.kind,
+                        "imsi": r.imsi,
+                        "mmec": r.mmec,
+                        "m_tmsi": r.m_tmsi,
+                    }
+                    for r in ev.records
+                ],
+            }
+        )
+        for q in list(self._subs):
+            try:
+                q.put_nowait(msg)
+            except asyncio.QueueFull:
+                # Slow client — drop the message.
+                pass
+
+
+def make_app(
+    db_path: str,
+    *,
+    pipeline: StreamingPipeline | None = None,
+) -> FastAPI:
     app = FastAPI(title="srsLTE-Sniffer dashboard", version="2.0.0")
+    hub = _Hub()
+    if pipeline is not None:
+        pipeline.subscribe(hub.publish)
 
     def _db() -> CaptureDB:
         return CaptureDB(db_path)
@@ -52,6 +103,7 @@ def make_app(db_path: str) -> FastAPI:
                 r["ts_str"] = _fmt_ts(r.get("ts"))
             return _env.get_template("dashboard.html").render(
                 stats=stats, recent=recent,
+                streaming=pipeline is not None,
             )
         finally:
             db.close()
@@ -72,7 +124,11 @@ def make_app(db_path: str) -> FastAPI:
     def stats_json():
         db = _db()
         try:
-            return JSONResponse(db.stats())
+            data = db.stats()
+            if pipeline is not None:
+                data["pipeline_processed"] = pipeline.processed
+                data["pipeline_dropped"] = pipeline.dropped
+            return JSONResponse(data)
         finally:
             db.close()
 
@@ -83,5 +139,18 @@ def make_app(db_path: str) -> FastAPI:
             return JSONResponse(db.recent_pagings(limit))
         finally:
             db.close()
+
+    @app.websocket("/ws")
+    async def ws_endpoint(ws: WebSocket) -> None:
+        await ws.accept()
+        q = hub.subscribe()
+        try:
+            while True:
+                msg = await q.get()
+                await ws.send_text(msg)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            hub.unsubscribe(q)
 
     return app

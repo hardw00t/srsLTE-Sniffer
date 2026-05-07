@@ -43,6 +43,10 @@ srslte_sniffer = ["templates/*.html"]
 testpaths = ["python/tests"]
 python_files = "test_*.py"
 addopts = "-q --strict-markers"
+markers = [
+    "hil: hardware-in-the-loop tests requiring docker + srsRAN images",
+    "asyncio_or_thread: streaming tests that drive asyncio directly",
+]
 
 [tool.ruff]
 line-length = 100
