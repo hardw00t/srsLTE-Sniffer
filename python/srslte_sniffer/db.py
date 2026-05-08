@@ -246,8 +246,12 @@ class CaptureDB:
         return int(cur.fetchone()[0])
 
     def recent_pagings(self, limit: int = 50) -> list[dict]:
+        """Most-recent paging rows including every radio's identifier
+        columns. Non-applicable identifiers are NULL per radio."""
         cur = self._conn.execute(
-            "SELECT ts, kind, imsi, mmec, m_tmsi, earfcn, cell_id "
+            "SELECT ts, radio_type, kind, imsi, mmec, m_tmsi, "
+            "tmsi, p_tmsi, ng_5g_s_tmsi, i_rnti, full_i_rnti, "
+            "earfcn, arfcn, cell_id "
             "FROM pagings ORDER BY ts DESC LIMIT ?",
             (limit,),
         )
@@ -255,10 +259,17 @@ class CaptureDB:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def imsis_by_count(self, limit: int = 20) -> list[dict]:
+        """IMSI leaderboard across every radio_type. The original v2
+        implementation filtered on `kind='imsi'` only; with multi-radio
+        support, IMSIs in 2G/3G captures land with their radio-specific
+        kind (e.g. tmsi extracted alongside imsi). We now key purely on
+        the `imsi` column being populated."""
         cur = self._conn.execute(
-            "SELECT imsi, COUNT(*) AS n, MIN(ts) AS first_seen, MAX(ts) AS last_seen "
-            "FROM pagings WHERE kind='imsi' AND imsi IS NOT NULL "
-            "GROUP BY imsi ORDER BY n DESC LIMIT ?",
+            "SELECT imsi, radio_type, COUNT(*) AS n, "
+            "MIN(ts) AS first_seen, MAX(ts) AS last_seen "
+            "FROM pagings "
+            "WHERE imsi IS NOT NULL "
+            "GROUP BY imsi, radio_type ORDER BY n DESC LIMIT ?",
             (limit,),
         )
         cols = [d[0] for d in cur.description]

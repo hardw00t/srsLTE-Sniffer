@@ -106,7 +106,12 @@ def decode(hex_payload: str) -> None:
 @click.option("--allowed-plmns", default="",
               help="Comma-separated allow-list, e.g. '525-01,525-02,525-03'")
 @click.option("--churn-threshold", type=int, default=50, show_default=True)
-def detect(db_path: str, allowed_plmns: str, churn_threshold: int) -> None:
+@click.option("--radio-type", default="4g", show_default=True,
+              help="Filter by radio_type. Use 'all' to include every "
+                   "radio (LTE-tuned rules will produce false positives "
+                   "on mixed DBs).")
+def detect(db_path: str, allowed_plmns: str, churn_threshold: int,
+           radio_type: str) -> None:
     """Run the rogue-eNB rules over the captured DB."""
     from .decoder import PagingRecord
     from .rogue_detector import CellSnapshot, run_all
@@ -114,19 +119,38 @@ def detect(db_path: str, allowed_plmns: str, churn_threshold: int) -> None:
 
     db = CaptureDB(db_path)
     try:
-        cells_q = db._conn.execute(
-            "SELECT cell_id, plmn, tac, si_periodicity FROM cells"
-        ).fetchall()
-        # paging_imsi_count / stmsi_count via subqueries
+        if radio_type == "all":
+            cell_q = ("SELECT cell_id, plmn, tac, si_periodicity "
+                      "FROM cells")
+            cell_args: tuple = ()
+            page_q = ("SELECT ts, kind, imsi, mmec, m_tmsi, cell_id "
+                      "FROM pagings")
+            page_args: tuple = ()
+            count_clause = ""
+        else:
+            cell_q = ("SELECT cell_id, plmn, tac, si_periodicity "
+                      "FROM cells WHERE radio_type = ?")
+            cell_args = (radio_type,)
+            page_q = ("SELECT ts, kind, imsi, mmec, m_tmsi, cell_id "
+                      "FROM pagings WHERE radio_type = ?")
+            page_args = (radio_type,)
+            count_clause = " AND radio_type = ?"
+
+        cells_q = db._conn.execute(cell_q, cell_args).fetchall()
         cells: list[CellSnapshot] = []
         for cid, plmn, tac, sip in cells_q:
+            count_args = (
+                (cid, radio_type) if count_clause else (cid,)
+            )
             ipage = db._conn.execute(
-                "SELECT COUNT(*) FROM pagings WHERE cell_id=? AND kind='imsi'",
-                (cid,),
+                f"SELECT COUNT(*) FROM pagings "
+                f"WHERE cell_id=? AND kind='imsi'{count_clause}",
+                count_args,
             ).fetchone()[0]
             spage = db._conn.execute(
-                "SELECT COUNT(*) FROM pagings WHERE cell_id=? AND kind='s-tmsi'",
-                (cid,),
+                f"SELECT COUNT(*) FROM pagings "
+                f"WHERE cell_id=? AND kind='s-tmsi'{count_clause}",
+                count_args,
             ).fetchone()[0]
             cells.append(
                 CellSnapshot(
@@ -135,9 +159,6 @@ def detect(db_path: str, allowed_plmns: str, churn_threshold: int) -> None:
                 )
             )
 
-        timeline_rows = db._conn.execute(
-            "SELECT ts, kind, imsi, mmec, m_tmsi, cell_id FROM pagings"
-        ).fetchall()
         timeline = [
             TimedPaging(
                 record=PagingRecord(
@@ -146,7 +167,9 @@ def detect(db_path: str, allowed_plmns: str, churn_threshold: int) -> None:
                 ),
                 ts_us=ts, cell_id=cid,
             )
-            for ts, k, imsi, mmec, mtmsi, cid in timeline_rows
+            for ts, k, imsi, mmec, mtmsi, cid in db._conn.execute(
+                page_q, page_args
+            ).fetchall()
         ]
         allowed = set(filter(None, allowed_plmns.split(","))) or None
         anomalies = run_all(cells, timeline, allowed_plmns=allowed,
@@ -162,17 +185,28 @@ def detect(db_path: str, allowed_plmns: str, churn_threshold: int) -> None:
 @main.command("track")
 @click.option("--db", "db_path", required=True)
 @click.option("--window-ms", type=int, default=200, show_default=True)
-def track_cmd(db_path: str, window_ms: int) -> None:
-    """TMSI-correlation report."""
+@click.option("--radio-type", default="4g", show_default=True,
+              help="Filter by radio_type. 'all' for every radio.")
+def track_cmd(db_path: str, window_ms: int, radio_type: str) -> None:
+    """TMSI-correlation report (LTE shape — see `srslte-sniffer move` for
+    cross-radio mobility correlation)."""
     from .decoder import PagingRecord
     from .tracker import TimedPaging, build_tracks
 
     db = CaptureDB(db_path)
     try:
-        rows = db._conn.execute(
-            "SELECT ts, kind, imsi, mmec, m_tmsi, cell_id FROM pagings "
-            "WHERE imsi IS NOT NULL OR m_tmsi IS NOT NULL"
-        ).fetchall()
+        if radio_type == "all":
+            rows = db._conn.execute(
+                "SELECT ts, kind, imsi, mmec, m_tmsi, cell_id FROM pagings "
+                "WHERE imsi IS NOT NULL OR m_tmsi IS NOT NULL"
+            ).fetchall()
+        else:
+            rows = db._conn.execute(
+                "SELECT ts, kind, imsi, mmec, m_tmsi, cell_id FROM pagings "
+                "WHERE radio_type = ? "
+                "AND (imsi IS NOT NULL OR m_tmsi IS NOT NULL)",
+                (radio_type,),
+            ).fetchall()
         timeline = [
             TimedPaging(
                 record=PagingRecord(
@@ -197,6 +231,26 @@ def track_cmd(db_path: str, window_ms: int) -> None:
             for t in tracks
         ]
         click.echo(json.dumps(out, indent=2))
+    finally:
+        db.close()
+
+
+@main.command("move")
+@click.option("--db", "db_path", required=True)
+@click.option("--window-s", type=int, default=300, show_default=True)
+def move_cmd(db_path: str, window_s: int) -> None:
+    """Cross-radio mobility report — same identifier seen on multiple cells.
+
+    Handles every radio_type's identifiers (IMSI / TMSI / M-TMSI / P-TMSI /
+    ng-5G-S-TMSI). An IMSI appearing on both 2G and 4G correlates as the
+    same subscriber via the IMSI key.
+    """
+    from .hub import correlate_subscriber_movement
+
+    db = CaptureDB(db_path)
+    try:
+        movements = correlate_subscriber_movement(db, window_s=window_s)
+        click.echo(json.dumps(movements, indent=2))
     finally:
         db.close()
 
