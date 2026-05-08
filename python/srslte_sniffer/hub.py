@@ -265,20 +265,35 @@ def make_hub_app(db_path: str, *, auth_token: str | None = None) -> FastAPI:
 
 def correlate_subscriber_movement(db: CaptureDB,
                                   *, window_s: int = 300) -> dict[str, list[int]]:
-    """Find IMSIs/M-TMSIs paged on >1 cell within ``window_s`` — a strong
-    indicator of UE mobility. Returns identifier → list of cell IDs."""
+    """Find subscribers paged on >1 cell within ``window_s`` — a strong
+    indicator of UE mobility. Returns identifier → sorted list of cell
+    IDs.
+
+    Cross-radio aware: tracks IMSIs (2G/3G/4G), M-TMSIs (4G), TMSIs
+    (2G/3G), P-TMSIs (3G), and ng-5G-S-TMSIs (5G). An IMSI seen in 2G
+    + 4G correlates as the same subscriber via the IMSI key; TMSIs
+    are namespaced per-radio because they collide across generations.
+    """
     out: dict[str, set[int]] = {}
     rows = db._conn.execute(
-        "SELECT ts, kind, imsi, mmec, m_tmsi, cell_id FROM pagings "
+        "SELECT ts, kind, radio_type, imsi, mmec, m_tmsi, "
+        "tmsi, p_tmsi, ng_5g_s_tmsi, cell_id FROM pagings "
         "WHERE cell_id IS NOT NULL "
         "ORDER BY ts ASC"
     ).fetchall()
     last_seen: dict[str, tuple[int, int]] = {}
-    for ts, kind, imsi, mmec, m_tmsi, cell_id in rows:
-        if kind == "imsi" and imsi:
+    for (ts, kind, radio_type, imsi, mmec, m_tmsi,
+         tmsi, p_tmsi, ng_5g_s_tmsi, cell_id) in rows:
+        if imsi:
             key = f"imsi:{imsi}"
         elif kind == "s-tmsi" and m_tmsi is not None:
             key = f"stmsi:{mmec}:{m_tmsi}"
+        elif kind == "tmsi" and tmsi is not None:
+            key = f"{radio_type}-tmsi:{tmsi}"
+        elif kind == "p-tmsi" and p_tmsi is not None:
+            key = f"{radio_type}-ptmsi:{p_tmsi}"
+        elif kind == "ng-5g-s-tmsi" and ng_5g_s_tmsi is not None:
+            key = f"ng5gtmsi:{ng_5g_s_tmsi}"
         else:
             continue
         prev = last_seen.get(key)
@@ -293,6 +308,8 @@ def correlate_subscriber_movement(db: CaptureDB,
     return {k: sorted(v) for k, v in out.items()}
 
 
+# Sentinel — older v2.3.1 implementation continued past this with a
+# legacy loop body. Removed below by the v2.3.2 patch.
 def push_records_sync(records: Iterable[dict],
                       url: str,
                       *,

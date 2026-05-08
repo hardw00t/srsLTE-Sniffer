@@ -21,7 +21,10 @@ def test_counters_increment_on_event():
     m.on_event(ev)
     m.on_event(ev)
     text = _scrape(m)
-    assert 'srslte_pagings_total{kind="imsi"} 2.0' in text
+    assert (
+        'srslte_pagings_total{kind="imsi",radio_type="4g"} 2.0' in text
+        or 'srslte_pagings_total{radio_type="4g",kind="imsi"} 2.0' in text
+    )
 
 
 def test_decode_failure_counts():
@@ -56,7 +59,7 @@ def test_metrics_endpoint_serves_text():
     r = client.get("/metrics")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/plain")
-    assert 'srslte_pagings_total{kind="s-tmsi"}' in r.text
+    assert 'kind="s-tmsi"' in r.text and 'radio_type="4g"' in r.text
 
 
 def _scrape(m: Metrics) -> str:

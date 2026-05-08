@@ -36,7 +36,7 @@ class Metrics:
         self.pagings = Counter(
             "srslte_pagings_total",
             "Total decoded paging records.",
-            ["kind"],
+            ["kind", "radio_type"],
             registry=self.registry,
         )
         self.decode_failures = Counter(
@@ -69,12 +69,21 @@ class Metrics:
 
     # ----- pipeline integration -----
 
-    def on_event(self, ev: StreamEvent) -> None:
+    def on_event(self, ev: StreamEvent, *, radio_type: str = "4g") -> None:
+        """Count one StreamEvent. The streaming pipeline is currently
+        4G-shaped so the default of "4g" matches reality; callers
+        running multi-radio adapters should override."""
         if not ev.decode_ok:
             self.decode_failures.inc()
             return
         for r in ev.records:
-            self.pagings.labels(kind=r.kind).inc()
+            self.pagings.labels(kind=r.kind, radio_type=radio_type).inc()
+
+    def on_wide_record(self, kind: str, radio_type: str) -> None:
+        """Increment without a StreamEvent — called by adapters
+        (gsm_adapter etc.) that emit WidePagingRecord straight to the DB
+        and don't traverse the StreamingPipeline."""
+        self.pagings.labels(kind=kind, radio_type=radio_type).inc()
 
     def on_anomaly(self, a: Anomaly) -> None:
         self.anomalies.labels(rule=a.rule, severity=a.severity).inc()

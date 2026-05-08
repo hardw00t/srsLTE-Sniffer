@@ -17,7 +17,7 @@
       "targets": [
         {
           "expr": "rate(srslte_pagings_total[1m])",
-          "legendFormat": "{{kind}}",
+          "legendFormat": "{{radio_type}} {{kind}}",
           "refId": "A"
         }
       ],
