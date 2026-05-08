@@ -229,25 +229,54 @@ def make_app(
                 geo.close()
 
     @app.get("/api/anomalies")
-    def anomalies(allowed_plmns: str | None = None):
-        """Run the rogue-eNB rules over the current DB snapshot."""
+    def anomalies(allowed_plmns: str | None = None,
+                  radio_type: str = "4g"):
+        """Run the rogue-eNB rules over the current DB snapshot.
+
+        ``radio_type`` filters which cells/pagings the LTE-shaped rules
+        run against. Default ``"4g"`` preserves v2.2 behaviour. Pass
+        ``"all"`` to run rules unfiltered (acceptable on single-radio
+        deployments; on multi-radio DBs this can produce false
+        positives — the LTE rules are tuned for LTE thresholds)."""
         from .decoder import PagingRecord
         from .rogue_detector import CellSnapshot, run_all
         from .tracker import TimedPaging
 
         db = _db()
         try:
+            if radio_type == "all":
+                cell_q = ("SELECT cell_id, plmn, tac, si_periodicity "
+                          "FROM cells")
+                cell_args: tuple = ()
+                page_q = ("SELECT ts, kind, imsi, mmec, m_tmsi, cell_id "
+                          "FROM pagings")
+                page_args: tuple = ()
+            else:
+                cell_q = ("SELECT cell_id, plmn, tac, si_periodicity "
+                          "FROM cells WHERE radio_type = ?")
+                cell_args = (radio_type,)
+                page_q = ("SELECT ts, kind, imsi, mmec, m_tmsi, cell_id "
+                          "FROM pagings WHERE radio_type = ?")
+                page_args = (radio_type,)
+
             cells = []
             for cid, plmn, tac, sip in db._conn.execute(
-                "SELECT cell_id, plmn, tac, si_periodicity FROM cells"
+                cell_q, cell_args
             ).fetchall():
+                kind_clause = (
+                    " AND radio_type = ?" if radio_type != "all" else ""
+                )
+                imsi_args = ((cid, radio_type)
+                             if radio_type != "all" else (cid,))
                 ipage = db._conn.execute(
-                    "SELECT COUNT(*) FROM pagings WHERE cell_id=? AND kind='imsi'",
-                    (cid,),
+                    f"SELECT COUNT(*) FROM pagings "
+                    f"WHERE cell_id=? AND kind='imsi'{kind_clause}",
+                    imsi_args,
                 ).fetchone()[0]
                 spage = db._conn.execute(
-                    "SELECT COUNT(*) FROM pagings WHERE cell_id=? AND kind='s-tmsi'",
-                    (cid,),
+                    f"SELECT COUNT(*) FROM pagings "
+                    f"WHERE cell_id=? AND kind='s-tmsi'{kind_clause}",
+                    imsi_args,
                 ).fetchone()[0]
                 cells.append(CellSnapshot(
                     cell_id=cid, plmn=plmn, tac=tac, si_periodicity=sip,
@@ -262,7 +291,7 @@ def make_app(
                     ts_us=ts, cell_id=cid,
                 )
                 for ts, k, imsi, mmec, mtmsi, cid in db._conn.execute(
-                    "SELECT ts, kind, imsi, mmec, m_tmsi, cell_id FROM pagings"
+                    page_q, page_args,
                 ).fetchall()
             ]
             allowed = (

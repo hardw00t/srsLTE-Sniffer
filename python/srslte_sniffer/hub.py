@@ -13,8 +13,14 @@ existing CaptureDB.
 NDJSON line format (one record per line):
 
     {"node_id": "sn1", "ts_us": ..., "kind": "paging",
-     "record": {"kind":"imsi", "imsi":"...", ...},
-     "earfcn": ..., "cell_id": ...}
+     "radio_type": "4g",                          # 2g | 3g | 4g | 5g-nsa | 5g-sa
+     "record": {"kind":"imsi"|"tmsi"|... , ...},  # generation-specific fields
+     "earfcn": ..., "arfcn": ..., "cell_id": ...}
+
+The wire format carries every WidePagingRecord field, so 2G/3G/5G
+captures pushed via the hub round-trip without losing identifiers.
+v2.2 hubs that only emitted 4G fields are forward-compatible: missing
+fields default to None.
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from .db import CaptureDB
-from .decoder import PagingRecord
+from .decoder_common import WidePagingRecord
 from .streaming import StreamEvent
 
 # ---- pusher ----------------------------------------------------------
@@ -64,19 +70,64 @@ class PushClient:
         self.failures = 0
 
     def _serialize(self, ev: StreamEvent) -> list[dict[str, Any]]:
+        """One JSON object per record. The pipeline today emits
+        ``decoder.PagingRecord`` (4G shape) — those carry only the
+        4G-specific identifiers. Cross-radio captures going through
+        ``gsm_adapter`` write straight to the DB without traversing this
+        path, so 4G shape is sufficient here. The wire format itself is
+        wide so a future cross-radio streaming pipeline drop-in works."""
         out = []
         for r in ev.records:
             out.append({
                 "node_id": self.cfg.node_id,
                 "ts_us": ev.ts_us,
                 "kind": "paging",
+                "radio_type": "4g",
                 "record": {
-                    "kind": r.kind, "imsi": r.imsi,
-                    "mmec": r.mmec, "m_tmsi": r.m_tmsi,
+                    "kind": r.kind,
+                    "imsi": r.imsi,
+                    "mmec": r.mmec,
+                    "m_tmsi": r.m_tmsi,
                     "cn_domain": r.cn_domain,
                 },
             })
         return out
+
+    @staticmethod
+    def serialize_wide(
+        wide: WidePagingRecord,
+        *,
+        node_id: str,
+        ts_us: int,
+        cell_id: int | None = None,
+        earfcn: int | None = None,
+        arfcn: int | None = None,
+    ) -> dict[str, Any]:
+        """Serialise a multi-radio WidePagingRecord into the wire shape.
+        Used by adapters (gsm_adapter, future 5G/3G adapters) that bypass
+        the StreamEvent path."""
+        return {
+            "node_id": node_id,
+            "ts_us": ts_us,
+            "kind": "paging",
+            "radio_type": wide.radio_type,
+            "earfcn": earfcn,
+            "arfcn": arfcn,
+            "cell_id": cell_id,
+            "record": {
+                "kind": wide.kind,
+                "imsi": wide.imsi,
+                "tmsi": wide.tmsi,
+                "p_tmsi": wide.p_tmsi,
+                "mmec": wide.mmec,
+                "m_tmsi": wide.m_tmsi,
+                "ng_5g_s_tmsi": wide.ng_5g_s_tmsi,
+                "i_rnti": wide.i_rnti,
+                "full_i_rnti": wide.full_i_rnti,
+                "imei": wide.imei,
+                "imeisv": wide.imeisv,
+            },
+        }
 
     async def on_event(self, ev: StreamEvent) -> None:
         if not ev.decode_ok or not ev.records:
@@ -170,17 +221,28 @@ def make_hub_app(db_path: str, *, auth_token: str | None = None) -> FastAPI:
                     n_skipped += 1
                     continue
                 rec_data = item.get("record") or {}
-                rec = PagingRecord(
+                # Construct a WidePagingRecord — covers every generation.
+                # Old (v2.2) clients that only sent 4G fields fill the
+                # rest with None which insert_wide_paging accepts.
+                wide = WidePagingRecord(
+                    radio_type=item.get("radio_type", "4g"),
                     kind=rec_data.get("kind", "unknown"),
-                    cn_domain=rec_data.get("cn_domain"),
                     imsi=rec_data.get("imsi"),
+                    tmsi=rec_data.get("tmsi"),
+                    p_tmsi=rec_data.get("p_tmsi"),
                     mmec=rec_data.get("mmec"),
                     m_tmsi=rec_data.get("m_tmsi"),
+                    ng_5g_s_tmsi=rec_data.get("ng_5g_s_tmsi"),
+                    i_rnti=rec_data.get("i_rnti"),
+                    full_i_rnti=rec_data.get("full_i_rnti"),
+                    imei=rec_data.get("imei"),
+                    imeisv=rec_data.get("imeisv"),
                 )
-                db.insert_paging(
-                    rec,
+                db.insert_wide_paging(
+                    wide,
                     ts_us=item.get("ts_us"),
                     earfcn=item.get("earfcn"),
+                    arfcn=item.get("arfcn"),
                     cell_id=item.get("cell_id"),
                 )
                 n_inserted += 1
