@@ -71,6 +71,31 @@ CREATE TABLE IF NOT EXISTS sibs (
     raw_hex TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sibs_type ON sibs(sib_type);
+
+-- Per-cell counters consumed by the per-generation rogue-eNB rules.
+-- These fields aren't in the paging stream, so they're populated by
+-- external monitoring code (capture-side instrumentation, log scrapers,
+-- gr-gsm-aware probes etc.) via `srslte-sniffer record-metric` or the
+-- `record_cell_metric` API. UPSERT-keyed on (radio_type, cell_id, plmn);
+-- omitted fields keep their previous value.
+CREATE TABLE IF NOT EXISTS cell_metrics (
+    radio_type TEXT NOT NULL,
+    cell_id INTEGER NOT NULL,
+    plmn TEXT,
+    ts INTEGER NOT NULL,
+    arfcn INTEGER,
+    -- 2G GSM
+    cipher_mode TEXT,                       -- "A5/0" | "A5/1" | "A5/3"
+    location_updates_per_min REAL,
+    -- 3G UMTS
+    rrc_reject_per_min REAL,
+    advertises_rel99_only INTEGER,          -- 0 | 1 (sqlite has no bool)
+    -- 5G NR
+    suci_replays_per_min REAL,
+    aka_failures_per_min REAL,
+    PRIMARY KEY (radio_type, cell_id, plmn)
+);
+CREATE INDEX IF NOT EXISTS idx_metrics_radio ON cell_metrics(radio_type);
 """
 
 # Migration: ALTER existing v2.x captures.db files to v3 shape. Idempotent.
@@ -219,6 +244,118 @@ class CaptureDB:
              sib1.si_periodicity, raw_hex),
         )
         return cur.lastrowid or 0
+
+    # ----- per-radio cell metrics (rogue-rule inputs) -----
+
+    def record_cell_metric(
+        self,
+        *,
+        radio_type: str,
+        cell_id: int,
+        plmn: str | None = None,
+        ts_us: int | None = None,
+        arfcn: int | None = None,
+        cipher_mode: str | None = None,
+        location_updates_per_min: float | None = None,
+        rrc_reject_per_min: float | None = None,
+        advertises_rel99_only: bool | None = None,
+        suci_replays_per_min: float | None = None,
+        aka_failures_per_min: float | None = None,
+    ) -> None:
+        """Upsert a per-cell metric snapshot. Fields left as ``None`` keep
+        their previous value (or stay NULL for a fresh row). Used by the
+        external ingesters that populate inputs to the per-generation
+        rogue-cell rules."""
+        ts = ts_us if ts_us is not None else int(time.time() * 1e6)
+        rel99_int = (
+            None if advertises_rel99_only is None
+            else (1 if advertises_rel99_only else 0)
+        )
+        # SQLite UPSERT: insert if missing, otherwise COALESCE non-NULL
+        # incoming values onto existing ones so partial updates work.
+        self._conn.execute(
+            """INSERT INTO cell_metrics
+                (radio_type, cell_id, plmn, ts, arfcn,
+                 cipher_mode, location_updates_per_min,
+                 rrc_reject_per_min, advertises_rel99_only,
+                 suci_replays_per_min, aka_failures_per_min)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(radio_type, cell_id, plmn) DO UPDATE SET
+                 ts = excluded.ts,
+                 arfcn = COALESCE(excluded.arfcn, cell_metrics.arfcn),
+                 cipher_mode = COALESCE(excluded.cipher_mode,
+                                        cell_metrics.cipher_mode),
+                 location_updates_per_min = COALESCE(
+                     excluded.location_updates_per_min,
+                     cell_metrics.location_updates_per_min),
+                 rrc_reject_per_min = COALESCE(
+                     excluded.rrc_reject_per_min,
+                     cell_metrics.rrc_reject_per_min),
+                 advertises_rel99_only = COALESCE(
+                     excluded.advertises_rel99_only,
+                     cell_metrics.advertises_rel99_only),
+                 suci_replays_per_min = COALESCE(
+                     excluded.suci_replays_per_min,
+                     cell_metrics.suci_replays_per_min),
+                 aka_failures_per_min = COALESCE(
+                     excluded.aka_failures_per_min,
+                     cell_metrics.aka_failures_per_min)""",
+            (
+                radio_type, cell_id, plmn, ts, arfcn,
+                cipher_mode, location_updates_per_min,
+                rrc_reject_per_min, rel99_int,
+                suci_replays_per_min, aka_failures_per_min,
+            ),
+        )
+
+    def gsm_snapshots(self) -> list:
+        """Build GsmCellSnapshot rows from cell_metrics. Caller imports
+        rogue_detector and feeds these to run_all(gsm_cells=...)."""
+        from .rogue_detector import GsmCellSnapshot
+        rows = self._conn.execute(
+            "SELECT cell_id, arfcn, cipher_mode, location_updates_per_min "
+            "FROM cell_metrics WHERE radio_type='2g'"
+        ).fetchall()
+        return [
+            GsmCellSnapshot(
+                cell_id=cid, arfcn=arfcn,
+                cipher_mode=cipher,
+                location_updates_per_min=lupm or 0.0,
+            )
+            for cid, arfcn, cipher, lupm in rows
+        ]
+
+    def umts_snapshots(self) -> list:
+        from .rogue_detector import UmtsCellSnapshot
+        rows = self._conn.execute(
+            "SELECT cell_id, plmn, rrc_reject_per_min, "
+            "advertises_rel99_only "
+            "FROM cell_metrics WHERE radio_type='3g'"
+        ).fetchall()
+        return [
+            UmtsCellSnapshot(
+                cell_id=cid, plmn=plmn,
+                rrc_reject_per_min=rrcr or 0.0,
+                advertises_rel99_only=bool(rel99),
+            )
+            for cid, plmn, rrcr, rel99 in rows
+        ]
+
+    def nr_snapshots(self) -> list:
+        from .rogue_detector import NRCellSnapshot
+        rows = self._conn.execute(
+            "SELECT cell_id, plmn, suci_replays_per_min, "
+            "aka_failures_per_min "
+            "FROM cell_metrics WHERE radio_type IN ('5g-sa','5g-nsa')"
+        ).fetchall()
+        return [
+            NRCellSnapshot(
+                cell_id=cid, plmn=plmn,
+                suci_replays_per_min=suci or 0.0,
+                aka_failures_per_min=aka or 0.0,
+            )
+            for cid, plmn, suci, aka in rows
+        ]
 
     def insert_sib(
         self,

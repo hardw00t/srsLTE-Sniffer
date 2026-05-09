@@ -298,7 +298,13 @@ def make_app(
                 set(filter(None, allowed_plmns.split(",")))
                 if allowed_plmns else None
             )
-            results = run_all(cells, timeline, allowed_plmns=allowed)
+            results = run_all(
+                cells, timeline,
+                allowed_plmns=allowed,
+                gsm_cells=db.gsm_snapshots() or None,
+                umts_cells=db.umts_snapshots() or None,
+                nr_cells=db.nr_snapshots() or None,
+            )
             return JSONResponse([a.__dict__ for a in results])
         finally:
             db.close()
