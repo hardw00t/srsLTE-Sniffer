@@ -172,8 +172,16 @@ def detect(db_path: str, allowed_plmns: str, churn_threshold: int,
             ).fetchall()
         ]
         allowed = set(filter(None, allowed_plmns.split(","))) or None
-        anomalies = run_all(cells, timeline, allowed_plmns=allowed,
-                            churn_threshold=churn_threshold)
+        # Build per-generation snapshots from cell_metrics so 2G/3G/5G
+        # rules fire when external ingesters have populated the table.
+        anomalies = run_all(
+            cells, timeline,
+            allowed_plmns=allowed,
+            churn_threshold=churn_threshold,
+            gsm_cells=db.gsm_snapshots() or None,
+            umts_cells=db.umts_snapshots() or None,
+            nr_cells=db.nr_snapshots() or None,
+        )
         click.echo(json.dumps(
             [a.__dict__ for a in anomalies],
             indent=2,
@@ -545,6 +553,60 @@ def hub(db_path: str, port: int, host: str,
     from .hub import make_hub_app
     app = make_hub_app(db_path, auth_token=auth_token)
     uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+@main.command("record-metric")
+@click.option("--db", "db_path", required=True)
+@click.option("--radio-type", required=True,
+              type=click.Choice(["2g", "3g", "4g", "5g-nsa", "5g-sa"]))
+@click.option("--cell-id", type=int, required=True)
+@click.option("--plmn", default=None)
+@click.option("--arfcn", type=int, default=None)
+@click.option("--cipher-mode", default=None,
+              help="2G only: A5/0, A5/1, A5/3.")
+@click.option("--location-updates-per-min", type=float, default=None,
+              help="2G only.")
+@click.option("--rrc-reject-per-min", type=float, default=None,
+              help="3G only.")
+@click.option("--rel99-only/--no-rel99-only", "rel99_only",
+              default=None, help="3G only.")
+@click.option("--suci-replays-per-min", type=float, default=None,
+              help="5G only.")
+@click.option("--aka-failures-per-min", type=float, default=None,
+              help="5G only.")
+def record_metric(
+    db_path: str, radio_type: str, cell_id: int,
+    plmn: str | None, arfcn: int | None,
+    cipher_mode: str | None,
+    location_updates_per_min: float | None,
+    rrc_reject_per_min: float | None,
+    rel99_only: bool | None,
+    suci_replays_per_min: float | None,
+    aka_failures_per_min: float | None,
+) -> None:
+    """Upsert a per-cell metric used by the per-generation rogue rules.
+
+    Fields left unset preserve their previous value. Designed for
+    external monitoring scripts to feed counters that the capture
+    binaries don't track today (cipher mode, AKA failures, etc.).
+    """
+    db = CaptureDB(db_path)
+    try:
+        db.record_cell_metric(
+            radio_type=radio_type, cell_id=cell_id, plmn=plmn,
+            arfcn=arfcn, cipher_mode=cipher_mode,
+            location_updates_per_min=location_updates_per_min,
+            rrc_reject_per_min=rrc_reject_per_min,
+            advertises_rel99_only=rel99_only,
+            suci_replays_per_min=suci_replays_per_min,
+            aka_failures_per_min=aka_failures_per_min,
+        )
+        click.echo(json.dumps({"recorded": True,
+                               "radio_type": radio_type,
+                               "cell_id": cell_id, "plmn": plmn},
+                              indent=2))
+    finally:
+        db.close()
 
 
 @main.command("geo-import")

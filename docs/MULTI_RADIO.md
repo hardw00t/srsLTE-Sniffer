@@ -101,6 +101,31 @@ generation-specific:
 The 4G rules unchanged — they apply to LTE traffic captured via
 `pdsch_sniffer`.
 
+### Wiring + the data-flow caveat (v2.3.4)
+
+`run_all()` invokes the per-gen rules when their snapshots are
+provided; CLI `detect` and `/api/anomalies` build those snapshots
+from the `cell_metrics` table.
+
+The fields the rules read (`cipher_mode`, `location_updates_per_min`,
+`rrc_reject_per_min`, `advertises_rel99_only`, `suci_replays_per_min`,
+`aka_failures_per_min`) **do not flow from any of our capture binaries
+today** — they need RRC/MAC counters that the C sniffers don't track.
+The `cell_metrics` table is populated by external monitoring code:
+
+```bash
+# Example: a 2G monitor scraping gr-gsm logs feeds the cipher-mode it
+# observed back to srsLTE-Sniffer.
+srslte-sniffer record-metric \
+    --db captures.db \
+    --radio-type 2g --cell-id 10 --plmn 525-05 \
+    --cipher-mode A5/0
+```
+
+See the `record-metric` subcommand for the full input shape. Until
+external instrumentation is wired, the per-gen rules silently no-op
+even with `--radio-type all`.
+
 ## What's not done (and why)
 
 - **Realtime 3G** — see "offline only" above.
