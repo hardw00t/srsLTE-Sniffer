@@ -116,6 +116,7 @@ class PushClient:
             "cell_id": cell_id,
             "record": {
                 "kind": wide.kind,
+                "cn_domain": wide.cn_domain,
                 "imsi": wide.imsi,
                 "tmsi": wide.tmsi,
                 "p_tmsi": wide.p_tmsi,
@@ -227,6 +228,7 @@ def make_hub_app(db_path: str, *, auth_token: str | None = None) -> FastAPI:
                 wide = WidePagingRecord(
                     radio_type=item.get("radio_type", "4g"),
                     kind=rec_data.get("kind", "unknown"),
+                    cn_domain=rec_data.get("cn_domain"),
                     imsi=rec_data.get("imsi"),
                     tmsi=rec_data.get("tmsi"),
                     p_tmsi=rec_data.get("p_tmsi"),

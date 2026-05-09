@@ -178,16 +178,43 @@ def run_all(
     *,
     allowed_plmns: set[str] | None = None,
     churn_threshold: int = 50,
+    gsm_cells: Iterable[GsmCellSnapshot] | None = None,
+    umts_cells: Iterable[UmtsCellSnapshot] | None = None,
+    nr_cells: Iterable[NRCellSnapshot] | None = None,
 ) -> list[Anomaly]:
+    """Run every applicable rogue-cell rule.
+
+    The 4G LTE rules (``cells`` + ``timeline``) always run. Per-generation
+    rules require their own snapshot inputs because they need fields the
+    DB schema doesn't track (cipher_mode, location_updates_per_min, etc.)
+    — pass them in if you've gathered them from monitoring code, otherwise
+    those rules silently skip.
+    """
     cells = list(cells)
     timeline = list(timeline)
     out: list[Anomaly] = []
+    # 4G LTE rules
     if allowed_plmns:
         out.extend(detect_unknown_plmn(cells, allowed_plmns))
     out.extend(detect_plmn_mismatch_in_tac(cells))
     out.extend(detect_excessive_stmsi_churn(timeline, threshold=churn_threshold))
     out.extend(detect_imsi_paging_rate(cells))
     out.extend(detect_si_periodicity_outlier(cells))
+    # 2G GSM rules
+    if gsm_cells is not None:
+        gsm_cells = list(gsm_cells)
+        out.extend(detect_a5_0_announcement(gsm_cells))
+        out.extend(detect_gsm_loc_update_storm(gsm_cells))
+    # 3G UMTS rules
+    if umts_cells is not None:
+        umts_cells = list(umts_cells)
+        out.extend(detect_umts_downgrade_signal(umts_cells))
+        out.extend(detect_umts_reject_storm(umts_cells))
+    # 5G NR rules
+    if nr_cells is not None:
+        nr_cells = list(nr_cells)
+        out.extend(detect_nr_suci_replay(nr_cells))
+        out.extend(detect_nr_aka_failure_storm(nr_cells))
     return out
 
 

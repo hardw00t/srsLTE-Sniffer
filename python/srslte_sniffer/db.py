@@ -175,12 +175,12 @@ class CaptureDB:
         ts = ts_us if ts_us is not None else int(time.time() * 1e6)
         cur = self._conn.execute(
             """INSERT INTO pagings
-                (ts, radio_type, kind, imsi, mmec, m_tmsi, tmsi, p_tmsi,
+                (ts, radio_type, kind, cn_domain, imsi, mmec, m_tmsi, tmsi, p_tmsi,
                  ng_5g_s_tmsi, i_rnti, full_i_rnti,
                  earfcn, arfcn, cell_id, raw_hex)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                ts, wide.radio_type, wide.kind, wide.imsi,
+                ts, wide.radio_type, wide.kind, wide.cn_domain, wide.imsi,
                 wide.mmec, wide.m_tmsi, wide.tmsi, wide.p_tmsi,
                 wide.ng_5g_s_tmsi, wide.i_rnti, wide.full_i_rnti,
                 earfcn, arfcn, cell_id, raw_hex,
