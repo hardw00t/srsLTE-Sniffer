@@ -1,51 +1,134 @@
 # srsLTE-Sniffer
 
-> Active branch: **`claude/project-summary-fPHUU`** (v2 — additive, master is untouched).
+> Active branch: **`v2/srsRAN_sniffer`** — additive, master is untouched.
+> Current head: v2.3.2 ([commit history](https://github.com/hardw00t/srsLTE-Sniffer/commits/v2/srsRAN_sniffer)).
 
-LTE / NR control-plane sniffer and analyzer. The original (archived) tool
-lives under [`Code/`](Code/) and [`Executables/`](Executables/) for
-reference; the v2 rewrite lives at the repo root and replaces the dead
-`srsLTE` upstream, the brittle hex-pattern parser, the `text2pcap`
-round-trip, and the CSV-only output.
+Multi-radio (2G / 3G / 4G LTE / 5G NR) cellular control-plane sniffer
+and analyzer. The original (archived) IMSI-catcher tool lives under
+[`Code/`](Code/) and [`Executables/`](Executables/) for reference; the
+v2 rewrite at the repo root replaces the dead `srsLTE` upstream, the
+brittle hex-pattern parser, the `text2pcap` round-trip, the CSV-only
+output, and the LTE-only scope.
 
 > **Capture is regulated or illegal in most jurisdictions** — read
 > [LEGAL.md](LEGAL.md) before doing anything that touches an antenna.
-> `srslte-sniffer scan` and `pdsch_sniffer` both refuse to run without
+> Every capture-mode entry point (`srslte-sniffer scan`, `pdsch_sniffer`,
+> `nr_sniffer`, the `loop_catcher.sh` driver) refuses to run without
 > `--i-have-authorization`.
 
 ## Quickstart (no SDR required)
 
 ```bash
 pip install -e .
+srslte-sniffer init                                   # idempotent first-run setup
 srslte-sniffer analyze "Output Files/imsi.pcap" --db captures.db
-srslte-sniffer dashboard --db captures.db   # http://127.0.0.1:8000
+srslte-sniffer dashboard --db captures.db             # http://127.0.0.1:8000
 ```
 
-## What's new in v2
+The included `Output Files/imsi.pcap` is a real ~250k-frame LTE capture
+used as a test fixture and a demo. After `analyze` it contains 312k
+paging records (117 IMSIs + 311k S-TMSIs + 51k multi-record frames).
 
-| Track | Status |
+## Capability matrix
+
+| Generation | Decoder | Realtime capture | Identity capture |
+|---|---|---|---|
+| **2G GSM** | `decoder_2g.py` (hand-rolled TS 04.18 parser) | `gsm_adapter.py` ← `grgsm_livemon` | IMSI / TMSI (cleartext on PCH) |
+| **3G UMTS** | `decoder_3g.py` (pycrate TS 25.331) | offline pcap only — see docs/MULTI_RADIO.md | IMSI / TMSI / P-TMSI |
+| **4G LTE** | `decoder.py` (pycrate TS 36.331) | `pdsch_sniffer` (srsRAN_4G) | IMSI / M-TMSI |
+| **5G NR** | `nr_decoder.py` (pycrate TS 38.331) | `nr_sniffer` skeleton + `--dry-run` | ng-5G-S-TMSI / I-RNTI / fullI-RNTI (SUPI is encrypted in SA) |
+
+## CLI surface
+
+```
+srslte-sniffer init                # first-run setup
+srslte-sniffer analyze <pcap|txt>  # batch decode → SQLite (replaces convert_to_csv)
+srslte-sniffer simulate <cap> <j>  # replay a saved capture into a journal
+srslte-sniffer stream <journal>    # tail journal → decode → stdout JSON-lines
+srslte-sniffer dashboard --db ...  # FastAPI dashboard + WebSocket live feed
+srslte-sniffer metrics --db ...    # Prometheus exporter (port 9100)
+srslte-sniffer detect --db ...     # rogue-eNB anomaly rules
+srslte-sniffer track  --db ...     # same-radio TMSI tracker
+srslte-sniffer move   --db ...     # cross-radio mobility correlator
+srslte-sniffer redact <in> <out>   # PII-redact a capture (deterministic, MCC-preserving)
+srslte-sniffer prune --older-than  # retention prune + VACUUM
+srslte-sniffer geo-import <csv>    # OpenCellID lookup cache
+srslte-sniffer hub --db ...        # multi-node aggregation receiver
+srslte-sniffer journal-replay <j>  # re-run analyzer over a journal
+srslte-sniffer scan --earfcns ...  # EARFCN sweep (requires SDR + authorization)
+srslte-sniffer decode <hex>        # one-shot decode of a paging PDU
+```
+
+Each command accepts `--radio-type` where it operates over the DB; the
+default is `4g` (preserves pre-multi-radio behaviour) with `all` to
+bypass.
+
+## What landed in each commit
+
+| Tag | What |
 |---|---|
-| 1. CMake + Docker + CI + srsRAN_4G port + typo fix | done |
-| 2. ASN.1 RRC decoder (replaces hex-pattern matching) | done — validated against 250k packets in the included demo capture |
-| 3. SIB2 capture, S-TMSI co-frame parsing | done |
-| 4. EARFCN scanner, SQLite store, FastAPI dashboard, crash-safe journal | done |
-| 5. TMSI tracker, rogue-eNB detector, 5G NR research-mode skeleton | done |
+| **v2** | ASN.1 decoder, srsRAN_4G port, SIB2 capture, EARFCN scanner, SQLite, FastAPI dashboard, TMSI tracker, rogue-eNB detector, 5G NR decoder skeleton |
+| **v2.1** | Async streaming pipeline, WebSocket live feed, capture simulator, HIL docker-compose, tshark dissector cross-check, MAC-LTE header decoder, OpenCellID geo cache, PRACH correlator skeleton |
+| **v2.2** | API-verification fixes against current srsRAN_4G headers, `pdsch_sniffer --dry-run`, Leaflet map view, time-series API, Prometheus exporter, webhook alerter, PCAP redactor, anomaly synthesizer + Hypothesis fuzzing, multi-node push/hub, dashboard token auth, retention prune, first-run init |
+| **v2.3** | 2G GSM (TS 04.18) + 3G UMTS (TS 25.331) decoders, GSMTAP wire format, gr-gsm adapter, 5G NR sniffer skeleton with `--dry-run`, DB schema migration with `radio_type` column, per-generation rogue rules |
+| **v2.3.1** | Plumbing audit pass: real NR PDUs in `--dry-run`, hub propagates `radio_type` + wide identifiers, analyzer dispatches GSM-L3 vs LTE-PCCH, `/api/anomalies` radio_type filter |
+| **v2.3.2** | Deeper audit: strengthened GSM heuristic (zero collisions on 250k LTE frames), cross-radio mobility correlator, CLI radio-type filters, `srslte_pagings_total{radio_type=…}` label, broadened `recent_pagings`/`imsis_by_count` |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design,
-[docs/MIGRATION.md](docs/MIGRATION.md) for the per-file change log,
-[docs/USAGE.md](docs/USAGE.md) for the CLI reference.
+## Tests
+
+- **165 / 165 Python** — pytest suite covering decoders, pcap I/O, DB,
+  journal, scanner, tracker, rogue detector, NR decoder, dashboard,
+  CLI, end-to-end analyzer, streaming pipeline, metrics, alerting,
+  redactor, MAC-LTE, OpenCellID, PRACH, hub, synthesizer, Hypothesis
+  fuzz tests, plus dedicated regression files for each plumbing fix
+  pass (`test_v231_fixes.py`, `test_v232_fixes.py`).
+- **2 / 2 C** (CTest) — `python_tests` runner + `sniffer_io_smoke`
+  binary-format check.
+- **`ruff check python/srslte_sniffer tools`** clean.
 
 ## Layout
 
 ```
-src/                  modernised C — pdsch_sniffer + cell_measurement
-python/srslte_sniffer faceset of the analyzer + decoder + dashboard
-python/tests/         pytest suite (49 tests, runs against demo capture)
-scripts/              loop_catcher.sh, dwell.sh
+src/pdsch_sniffer/    LTE PCCH C sniffer (srsRAN_4G); --dry-run testable without RF
+src/cell_measurement/ SIB1 + SIB2 capture
+src/nr_sniffer/       5G NR PCCH C sniffer skeleton
+python/srslte_sniffer Analyzer + decoders + dashboard + hub + adapters
+python/tests/         165-test pytest suite
+tools/                dissector_diff.py (tshark cross-check), benchmark.py
+scripts/              loop_catcher.sh (modernised), dwell.sh
+examples/             grafana-dashboard.json, prometheus.yml, alertmanager-rules.yml
+tests/hil/            docker-compose lab stack (srsenb + srsue over ZMQ)
 cmake/                FindsrsRAN.cmake
-Code/, Executables/   legacy tree, kept verbatim
+docs/                 ARCHITECTURE, MIGRATION, USAGE, MULTI_RADIO,
+                      HIL_VALIDATION, NR_REALTIME, RUST_DECODER, LEGAL
+Code/, Executables/   archived legacy tree (kept verbatim)
 Output Files/         legacy capture samples — used as test fixtures
+imsi_pcap_demo.{txt,pcap}  the ~250k-frame demo capture
 ```
+
+## Documentation
+
+| Doc | Topic |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | High-level design, C/Python split, why pcapng + journal |
+| [`docs/USAGE.md`](docs/USAGE.md) | Per-subcommand CLI reference |
+| [`docs/MIGRATION.md`](docs/MIGRATION.md) | Per-file change log from the legacy tree |
+| [`docs/MULTI_RADIO.md`](docs/MULTI_RADIO.md) | 2G / 3G / 4G / 5G capability matrix, capture sources, schema |
+| [`docs/HIL_VALIDATION.md`](docs/HIL_VALIDATION.md) | Bring-up runbook for the docker-compose lab |
+| [`docs/NR_REALTIME.md`](docs/NR_REALTIME.md) | 5G NR realtime sniffer design + deferral plan |
+| [`docs/RUST_DECODER.md`](docs/RUST_DECODER.md) | Rust decoder design + deferral rationale |
+| [`LEGAL.md`](LEGAL.md) | Jurisdiction notes + runtime safeguards |
+
+## What's deliberately not built
+
+- **Realtime 3G UMTS sniffer** — no maintained OSS upstream; offline
+  decoder ships, no realtime path. See [`docs/MULTI_RADIO.md`](docs/MULTI_RADIO.md).
+- **Realtime 5G NR sniffer** — needs `srsRAN_Project` (separate from
+  `srsRAN_4G`). Skeleton + CMake hook ready; live mode is a stub.
+  See [`docs/NR_REALTIME.md`](docs/NR_REALTIME.md).
+- **Rust decoder backend** — pycrate benchmarks at ~27k pkt/s, well
+  above any current use case. See [`docs/RUST_DECODER.md`](docs/RUST_DECODER.md)
+  for the trigger conditions to revisit.
 
 ---
 
