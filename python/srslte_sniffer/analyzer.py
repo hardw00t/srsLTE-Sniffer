@@ -180,7 +180,33 @@ def analyze_frames(
                     )
 
         else:
-            # Unknown framing — try PCCH first, else give up.
+            # Unknown framing — try GSM L3 first (the byte-0+byte-1
+            # heuristic is unambiguous on real LTE traffic), then fall
+            # through to LTE PCCH UPER decode.
+            if _looks_like_gsm_paging(frame.payload):
+                res2g = decode_paging_2g(frame.payload)
+                if res2g.ok:
+                    wides = extract_records_2g(res2g)
+                    if len(wides) > 1:
+                        stats.multi_record_frames += 1
+                    for w in wides:
+                        stats.pagings_total += 1
+                        stats.pagings_2g += 1
+                        if w.kind == "imsi":
+                            stats.pagings_imsi += 1
+                        elif w.kind == "tmsi":
+                            stats.pagings_stmsi += 1
+                        else:
+                            stats.pagings_unknown += 1
+                        if db is not None:
+                            db.insert_wide_paging(
+                                w, ts_us=ts, cell_id=cell_id,
+                                raw_hex=frame.payload.hex(),
+                            )
+                    continue
+                stats.pagings_2g_failed += 1
+                stats.failed += 1
+                continue
             res = decode_pcch(frame.payload)
             if res.ok:
                 stats.decoded_pcch += 1

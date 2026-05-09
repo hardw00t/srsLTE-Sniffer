@@ -186,12 +186,41 @@ def detect(db_path: str, allowed_plmns: str, churn_threshold: int,
 @click.option("--db", "db_path", required=True)
 @click.option("--window-ms", type=int, default=200, show_default=True)
 @click.option("--radio-type", default="4g", show_default=True,
-              help="Filter by radio_type. 'all' for every radio.")
+              help="Filter by radio_type. 'all' for every radio. "
+                   "Note: track is LTE-shaped — for 2G/3G/5G use `move`.")
 def track_cmd(db_path: str, window_ms: int, radio_type: str) -> None:
-    """TMSI-correlation report (LTE shape — see `srslte-sniffer move` for
-    cross-radio mobility correlation)."""
+    """TMSI-correlation report.
+
+    This command is LTE-shaped: it uses 4G IMSI / M-TMSI fields only.
+    For non-4G radios (which carry their identifiers in different DB
+    columns) it'll silently miss tracks — so we redirect to ``move``
+    automatically and tell the user.
+    """
     from .decoder import PagingRecord
     from .tracker import TimedPaging, build_tracks
+
+    if radio_type not in ("4g", "all"):
+        # `track` cannot see 2G TMSI / 3G P-TMSI / 5G ng-5G-S-TMSI (the
+        # build_tracks input is PagingRecord-shaped). Tell the user
+        # explicitly and run the cross-radio analyser instead.
+        click.echo(
+            f"# `track` is LTE-only; --radio-type={radio_type} routes to `move` "
+            f"(cross-radio mobility correlator). Use `srslte-sniffer move` "
+            f"directly to skip this notice.",
+            err=True,
+        )
+        from .hub import correlate_subscriber_movement
+
+        db = CaptureDB(db_path)
+        try:
+            window_s = max(1, (window_ms + 999) // 1000)
+            click.echo(json.dumps(
+                correlate_subscriber_movement(db, window_s=window_s),
+                indent=2,
+            ))
+        finally:
+            db.close()
+        return
 
     db = CaptureDB(db_path)
     try:

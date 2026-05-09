@@ -51,6 +51,7 @@ class WidePagingRecord:
     ng_5g_s_tmsi: int | None = None
     i_rnti: int | None = None
     full_i_rnti: int | None = None
+    cn_domain: str | None = None  # "ps" | "cs" — applies to 2G/3G/4G PCCH
 
     @property
     def primary_tmsi(self) -> int | None:

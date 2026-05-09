@@ -74,16 +74,36 @@
 
   <h2>Recent pagings</h2>
   <table>
-    <thead><tr><th>Time</th><th>Kind</th><th>IMSI</th><th>MMEC</th><th>M-TMSI</th><th>EARFCN</th></tr></thead>
+    <thead><tr>
+      <th>Time</th><th>Radio</th><th>Kind</th><th>IMSI</th>
+      <th>Identifier</th><th>Channel</th>
+    </tr></thead>
     <tbody>
     {% for r in recent %}
       <tr>
         <td>{{ r.ts_str }}</td>
+        <td><span class="pill">{{ r.radio_type or '4g' }}</span></td>
         <td>{{ r.kind }}</td>
         <td>{{ r.imsi or '' }}</td>
-        <td>{{ r.mmec if r.mmec is not none else '' }}</td>
-        <td>{{ r.m_tmsi if r.m_tmsi is not none else '' }}</td>
-        <td>{{ r.earfcn if r.earfcn is not none else '' }}</td>
+        <td>
+          {%- if r.m_tmsi is not none -%}
+            M-TMSI {{ r.mmec }}:{{ r.m_tmsi }}
+          {%- elif r.tmsi is not none -%}
+            TMSI {{ r.tmsi }}
+          {%- elif r.p_tmsi is not none -%}
+            P-TMSI {{ r.p_tmsi }}
+          {%- elif r.ng_5g_s_tmsi is not none -%}
+            ng-5G-S-TMSI {{ r.ng_5g_s_tmsi }}
+          {%- elif r.full_i_rnti is not none -%}
+            fullI-RNTI {{ r.full_i_rnti }}
+          {%- elif r.i_rnti is not none -%}
+            I-RNTI {{ r.i_rnti }}
+          {%- endif -%}
+        </td>
+        <td>
+          {%- if r.earfcn is not none -%}EARFCN {{ r.earfcn }}{%- endif -%}
+          {%- if r.arfcn is not none -%}ARFCN {{ r.arfcn }}{%- endif -%}
+        </td>
       </tr>
     {% endfor %}
     </tbody>
